@@ -1,8 +1,10 @@
 # pi-fleet
 
-Visible sub-agents for [pi-coding-agent](https://github.com/earendil-works/pi-coding-agent): delegate a task, a **real herdr tab** opens next to your workspace with a child `pi` working in an **isolated treehouse worktree**, the main chat stays free, and the result lands back in the chat — waking you only when the captain is actually needed (failure or input required).
+Visible sub-agents for [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`): delegate a task, a **real herdr tab** opens next to your workspace with a child `pi` working in an **isolated treehouse worktree**, the main chat stays free, and the result lands back in the chat — waking you only when the captain is actually needed (failure or input required).
 
-A Firstmate-like experience inside pi, without external agents.
+A [Firstmate](https://github.com/kunchenguid/firstmate)-like experience inside pi, without external agents.
+
+> **Inspired by [Firstmate](https://github.com/kunchenguid/firstmate)** — the original fleet orchestrator for pi. pi-fleet brings the same visible-tab + isolated-worktree + captain-only wake pattern natively into pi.
 
 ---
 
@@ -34,9 +36,9 @@ A Firstmate-like experience inside pi, without external agents.
 
 | Component | Version | Notes |
 |---|---|---|
-| [pi](https://github.com/earendil-works/pi-coding-agent) | ≥ 0.84 | the main agent |
-| [herdr](https://github.com/earendil-works/herdr) | ≥ 0.8 | `default` session running; socket `~/.config/herdr/herdr.sock` |
-| [treehouse](https://github.com/earendil-works/treehouse) | ≥ 2.3 | pool configured for the repos you work on (see below) |
+| [pi](https://github.com/earendil-works/pi) | ≥ 0.84 | the main agent |
+| [herdr](https://github.com/ogulcancelik/herdr) | ≥ 0.8 | `default` session running; socket `~/.config/herdr/herdr.sock` |
+| [treehouse](https://github.com/markevans/treehouse) | ≥ 2.3 | pool configured for the repos you work on (see below) |
 | `jq` | — | `brew install jq` |
 | `bash` + `python3` | — | present on macOS |
 | [pi-subagents](https://github.com/nicobailon/pi-subagents) | optional | background-work registry under the hood; without it the extension falls back |
