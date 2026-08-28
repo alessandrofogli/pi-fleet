@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # pi-fleet · setup su una nuova macchina.
 #
-# Fa: check prerequisiti, installa l'estensione (pi install .), pi-subagents,
+# Fa: check prerequisiti, installa l'estensione (pi install .),
 # scrive ~/.pi/AGENTS.md dalla policy globale (backup del file esistente),
-# scrive la config pi-subagents (timeout 6h + waitTool), e stampa i passi finali.
+# configura treehouse per i progetti in FLEET_PROJECTS_DIR,
+# scrive la config sub-agent (timeout 6h + waitTool), e stampa i passi finali.
 #
 # Uso:  ./bin/setup-fleet.sh
 set -u
@@ -46,27 +47,51 @@ echo
 say "2/5 · installa l'estensione pi-fleet (pi install .)"
 ( cd "$PACKAGE_DIR" && pi install . ) || { err "pi install . fallita"; exit 1; }
 
-echo
-say "3/5 · pi-subagents (registry background-work, consigliato)"
-if pi list 2>/dev/null | grep -q pi-subagents; then
-  echo "   già installato"
-else
-  pi install npm:pi-subagents && echo "   installato npm:pi-subagents" \
-    || warn "pi-subagents non installato (l'estensione usa il fallback registry)"
-fi
-
 # --------------------------------------------------------- AGENTS.md globale ----
 echo
-say "4/5 · ~/.pi/AGENTS.md (policy delega pi-fleet)"
+say "3/5 · ~/.pi/AGENTS.md (policy delega pi-fleet)"
 if [[ -f "$HOME_AGENTS" ]]; then
   cp "$HOME_AGENTS" "$HOME_AGENTS.bak" && echo "   backup del file esistente → $HOME_AGENTS.bak"
 fi
 cp "$PACKAGE_DIR/templates/AGENTS.global.md" "$HOME_AGENTS" \
   && echo "   scritto: $HOME_AGENTS (policy: delega automatica, anti-polling, wake solo failed/needs_input)"
 
-# ------------------------------------------------- config pi-subagents (6h) ----
+# ------------------------------------------------- treehouse auto-config ----
 echo
-say "5/5 · config pi-subagents (timeout 6h + waitTool)"
+say "4/5 · configura treehouse per i progetti in FLEET_PROJECTS_DIR"
+configure_treehouse_projects() {
+  local root="${FLEET_PROJECTS_DIR:-}"
+  if [[ -z "$root" ]]; then
+    warn "FLEET_PROJECTS_DIR non impostato — salto auto-config treehouse."
+    echo "       Imposta: export FLEET_PROJECTS_DIR=~/projects  (nel tuo ~/.zshrc o ~/.bashrc)"
+    echo "       Poi riavvia questo script o esegui manualmente:"
+    echo "         cd <repo> && treehouse config --root ~/.treehouse && treehouse add --target ."
+    return 0
+  fi
+  # espandi ~ se presente
+  root="${root/#\~/$HOME}"
+  if [[ ! -d "$root" ]]; then
+    warn "FLEET_PROJECTS_DIR non esiste: $root — salto."
+    return 0
+  fi
+  local count=0
+  for dir in "$root"/*/; do
+    [[ -d "$dir/.git" ]] || continue
+    echo "   configuro treehouse per: $(basename "$dir")"
+    ( cd "$dir" && treehouse config --root ~/.treehouse && treehouse add --target . ) \
+      && ((count++)) || warn "   fallito per $(basename "$dir")"
+  done
+  if [[ $count -eq 0 ]]; then
+    warn "nessun repo git trovato in $root"
+  else
+    echo "   ✓ $count repo configurati"
+  fi
+}
+configure_treehouse_projects
+
+# ------------------------------------------------- config subagent timeout (6h) ----
+echo
+say "5/5 · config sub-agent timeout 6h + waitTool"
 SUB_CFG="$HOME/.pi/agent/extensions/subagent/config.json"
 mkdir -p "$(dirname "$SUB_CFG")"
 if [[ -f "$SUB_CFG" ]]; then
@@ -81,10 +106,8 @@ echo "────────────────────────�
 say "FATTO. Ultimi passi manuali:"
 echo
 echo "  1. Avvia herdr (se non l'hai fatto): herdr"
-echo "  2. Configura il pool treehouse dei repo:"
-echo "       cd <repo-path> && treehouse config --root ~/.treehouse"
-echo "       treehouse add --target ."
-echo "       # Example: export FLEET_PROJECTS_DIR=~/projects  (enables short names)"
+echo "  2. (Già fatto se FLEET_PROJECTS_DIR era impostato) Altrimenti configura treehouse manualmente:"
+echo "       cd <repo-path> && treehouse config --root ~/.treehouse && treehouse add --target ."
 echo "  3. Check the default model in ~/.pi/agent/settings.json"
 echo "     if needed (children INHERIT the active model at launch)."
 echo "  4. RESTART pi (extension loads at startup)."

@@ -26,7 +26,7 @@ A [Firstmate](https://github.com/kunchenguid/firstmate)-like experience inside p
                          · failed/needs_input → wake (triggerTurn) — captain needed
 ```
 
-- **Not child processes**: each sub-agent is an **independent pi session** in a herdr pane (like pi-subagents, which also creates separate pi sessions). Coordination is via **shared state files in `~/.pi/fleet/`**.
+- **Not child processes**: each sub-agent is an **independent pi session** in a herdr pane. Coordination is via **shared state files in `~/.pi/fleet/`**.
 - Child model = **active model of the main at launch time** (`ctx.model`), unless you pass an explicit `model`.
 - Worktree **always** by default; never auto-merges; PRs only on explicit confirmation.
 
@@ -41,7 +41,7 @@ A [Firstmate](https://github.com/kunchenguid/firstmate)-like experience inside p
 | [treehouse](https://github.com/markevans/treehouse) | ≥ 2.3 | pool configured for the repos you work on (see below) |
 | `jq` | — | `brew install jq` |
 | `bash` + `python3` | — | present on macOS |
-| [pi-subagents](https://github.com/nicobailon/pi-subagents) | optional | background-work registry under the hood; without it the extension falls back |
+
 
 Tested on **macOS** (launcher assumes no `setsid`, POSIX `sed`, `treehouse` — macOS/POSIX).
 
@@ -76,13 +76,12 @@ git clone git@github.com:alessandrofogli/pi-fleet.git
 ./bin/setup-fleet.sh
 ```
 
-The script checks prerequisites, runs `pi install .`, installs `pi-subagents`, writes `~/.pi/AGENTS.md` (backing up an existing one to `.bak`), configures the 6h subagent timeout, and prints next steps.
+The script checks prerequisites, runs `pi install .`, writes `~/.pi/AGENTS.md` (backing up an existing one to `.bak`), configures treehouse for all repos in `FLEET_PROJECTS_DIR`, sets the 6h subagent timeout, and prints next steps.
 
 ### 3. Manual install
 
 ```bash
 pi install .                 # from inside the package directory
-pi install npm:pi-subagents  # recommended (background-work registry)
 ```
 
 `pi install .` registers the local package in `~/.pi/agent/settings.json` automatically — no manual path editing needed. If you clone elsewhere, just run `pi install .` again from the new location.
@@ -97,7 +96,7 @@ cp templates/AGENTS.global.md ~/.pi/AGENTS.md
 
 (If you already have `~/.pi/AGENTS.md`, merge it or keep the backup: the setup script saves `AGENTS.md.bak` automatically.)
 
-Optional subagent config (6h timeout + wait tool): see `templates/subagents.config.json` → `~/.pi/agent/extensions/subagent/config.json`.
+Subagent config (6h timeout + wait tool): see `templates/subagents.config.json` → `~/.pi/agent/extensions/subagent/config.json`.
 
 ### 5. Restart pi
 
@@ -190,7 +189,7 @@ State on disk in `~/.pi/fleet/`: `<id>.json` (state, title, project, cwd, pane/t
 - **Reconcile** at startup: active tasks without a live herdr pane → `done`/`failed`/`aborted` (with marker checks)
 - **Captain gate**: extension also loads in child sessions (same settings), but watcher/reconcile/provider are active **only** where `cwd = $HOME` (or `PI_FLEET_CAPTAIN=1`) — otherwise each child would wake itself with others' `fleet_notice`
 - **Active model**: `fleet_launch` passes `--model <ctx.model.id>` (current main model), not the static `PI_*` env vars
-- **Background-work** provider on pi-subagents registry (try/catch import → fallback `Symbol.for("pi-subagents.background-work.v1")`)
+- **Background-work** registry: built-in fallback (no external dependency); tasks appear in `fleet_status` only
 
 ---
 

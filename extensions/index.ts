@@ -10,7 +10,6 @@
  *  - fleet_attach  : porta il focus herdr sul tab del task
  *  - watcher in-process: risveglia la chat (sendMessage triggerTurn) quando un
  *    task entra in failed/needs_input (i done sono silenziosi, come da decisioni F0)
- *  - registra i task come background-work provider di pi-subagents (FleetView)
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -320,49 +319,12 @@ interface BackgroundWorkProviderShape {
   reconcile?(context: { sessionId: string; nowMs: number }): void;
 }
 
-/** Fallback: scrive direttamente nel registry globale condiviso da pi-subagents. */
-function registerFallbackProvider(provider: BackgroundWorkProviderShape): (() => void) | null {
-  try {
-    const reg = (globalThis as Record<PropertyKey, unknown>)[Symbol.for("pi-subagents.background-work.v1")] as
-      | { version: number; providers: Map<string, unknown> }
-      | undefined;
-    if (!reg || !(reg.providers instanceof Map)) return null;
-    reg.providers.set(provider.name, provider);
-    return () => {
-      if (reg.providers.get(provider.name) === provider) reg.providers.delete(provider.name);
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function registerBackgroundWork(): Promise<void> {
-  const provider: BackgroundWorkProviderShape = {
-    name: "pi-fleet",
-    listActiveWork: () =>
-      listTasks()
-        .filter((t) => ACTIVE_STATES.has(t.state))
-        .map((t) => ({ id: t.id, sessionId: process.env.PI_SESSION_FILE ?? "" })),
-    wakeChannels: [WAKE_CHANNEL],
-  };
-  try {
-    const mod = await import("pi-subagents/background-work");
-    providerUnregister = mod.registerBackgroundWorkProvider(provider);
-  } catch (e) {
-    providerUnregister = registerFallbackProvider(provider);
-    console.warn(
-      `[pi-fleet] import pi-subagents/background-work fallito (${e instanceof Error ? e.message : String(e)}); usato il registry globale.`,
-    );
-  }
-}
-
 // ---------------------------------------------------------------- tools ----
 // I "subagent" non sono processi figli: sono sessioni pi INDIPENDENTI nel pane
 // herdr, coordinate via i file condivisi in ~/.pi/fleet. Tutte caricano questa
 // estensione → il watcher/invio dei fleet_notice DEVE scattare SOLO nel capitano
 // (cwd = HOME, policy AGENTS.md). Nei figli l'estensione resta muta: niente
-// watcher, niente reconcile, niente provider background-work (l'import sul
-// registro condiviso sbaglierebbe il sessionId), solo i tool di consultazione.
+// watcher, niente reconcile, solo i tool di consultazione.
 const IS_CAPTAIN: boolean =
   process.env.PI_FLEET_CHILD === "1"
     ? false
@@ -590,22 +552,11 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       await reconcileStaleTasks();
       stopWatcher = startWatcher(pi, watch);
     })();
-    void registerBackgroundWork();
   });
 
   pi.on("session_shutdown", () => {
     generation++;
     stopWatcher?.();
     stopWatcher = null;
-    providerUnregister?.();
-    providerUnregister = null;
   });
-
-  void registerBackgroundWorkSafe();
-}
-
-/** Nei figli (sessioni pi separate ma NON capitano) il provider non va registrato. */
-async function registerBackgroundWorkSafe(): Promise<void> {
-  if (!IS_CAPTAIN) return;
-  await registerBackgroundWork();
 }
