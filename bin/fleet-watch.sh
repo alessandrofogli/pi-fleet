@@ -2,6 +2,10 @@
 # pi-fleet · fleet-watch.sh — watcher esterno zero-token (L3), loop polling+classificazione
 # Esegue fuori da Pi (zero-token, restart-proof), classifica task JSON in ~/.pi/fleet
 # e accoda wake actionable su .wake-queue. Singleton via fleet-lock-lib.sh.
+# L3.5 group barrier: tasks with groupId barrier are buffered by the TS coordinator,
+# not woken per-task. This bash watcher still exits with signal: <id>.done for each
+# terminal task; the TS extension (fleet-group.ts) filters before sendMessage
+# and emits a single group digest when pending==0. needs_input breaks barrier immediately.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

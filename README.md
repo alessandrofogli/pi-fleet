@@ -167,6 +167,14 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 
 State on disk in `~/.pi/fleet/`: `<id>.json` (state, title, project, cwd, pane/tab, summary, changedFiles), `<id>.done.json` / `<id>.needs-input.json` (child markers), `<id>.abort`, `<id>.log`, `tasks/<id>.brief.md`.
 
+### Gruppi di task (L3.5)
+
+Lancia N task nello stesso messaggio → formano automaticamente un gruppo.
+Vedrai un unico digest verboso quando tutti hanno finito. `needs_input` sveglia subito.
+`fleet_status` mostra `grp:xxx 2/3`, `fleet_status --group <id>` filtra.
+
+Dettaglio: `groupId`/`groupSize`/`groupLabel`/`groupMode` in `{id}.json`; stato gruppo persistito in `~/.pi/fleet/.wake-groups/{groupId}.json` per recovery dopo restart Pi. `fleet_status` raggruppa per `groupId` e mostra `Gruppo <id> (label) — 2/3 completi:` + `Singoli:`.
+
 ---
 
 ## Architecture

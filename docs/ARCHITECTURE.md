@@ -94,6 +94,96 @@ Lifecycle bridge. Captain-only (`cwd==HOME` or `PI_FLEET_CAPTAIN=1`).
 
 ---
 
+## L3.5 Group Wake Barrier
+
+Batch di N task lanciati nello stesso messaggio → stesso `groupId`, unico digest barrierato.
+
+### Comportamento
+
+| Caso | Comportamento | Wake |
+|---|---|---|
+| Gruppo 3, tutti `done` | Nessun wake intermedio. Quando 3/3 → **unico** `fleet_notice` verboso con 3 sezioni | `triggerTurn:false` (followUp) |
+| Gruppo 3, uno `needs_input` | **Wake immediato** (non aspetta gli altri): `gruppo X: task Y richiede input (2 running)` | `triggerTurn:true` |
+| Gruppo 3, uno `failed` | Barrier (aspetta tutti, come `done`) → digest finale `2 done + 1 failed` | `triggerTurn:true` se failed incluso |
+| Gruppo misto durate (1′ / 10′ / 25′) | Barrier penalizza feedback precoce — voluto. `fleet_status` resta consultabile | — |
+| Task singolo (no `groupId`) | Retrocompatibile: `groupId = task.id`, `groupSize = 1` → wake immediato come prima | come L2/L3 |
+
+`groupMode` futuro: `"barrier"` (default) vs `"streaming"` per-gruppo; `groupFailPolicy` aperto.
+
+### Diagramma flusso barrier
+
+```
+ batch (1 messaggio LLM)          launcher                watcher / coordinator         chat
+ ─────────────────────            ────────                ─────────────────────         ────
+ 3× fleet_launch ──► groupId=grp-a1b2c3, groupSize=3 ──► 3 tab herdr + worktree
+                      scrivi {id}.json con groupId/size
+                                                            │
+ Task A done ──► scrive {id}.done.json, chiude tab ────────►│ bufferizza {id, summary}
+ Task B done ──► idem ──────────────────────────────────────►│ bufferizza (2/3)
+ Task C done ──► idem ──────────────────────────────────────►│ 3/3 → compone digest verboso
+                                                            │   "⚑ gruppo grp-a1b2c3 completo (3/3)"
+                                                            │   + sezione per task (titolo, stato, summary, changedFiles)
+                                                            ├──────────────────────────────► sendMessage(fleet_notice, followUp)
+                                                            │
+ Task B needs_input ──► scrive .needs-input.json ───────────►│ flush IMMEDIATO
+                                                            │   "⚑ gruppo grp-a1b2c3: task B richiede input (A done, C running)"
+                                                            ├──────────────────────────────► sendMessage(triggerTurn:true)
+```
+
+- Tab/worktree dei task già finiti si chiudono subito (stato su disco, wake bufferizzato).
+- Solo `needs_input` tiene tab vivo, come L2.
+- Il main LLM nel turno di wake fa sintesi condensata (“in breve: …”) — è LLM, non estensione.
+
+### Formato stato
+
+```jsonc
+// ~/.pi/fleet/{taskid}.json — campi L3.5 aggiunti (opzionali, retrocompatibili)
+{
+  "id": "rifattorizza-auth-042",
+  "groupId": "grp-20260828-a1b2c3",   // batch del turno LLM, o task.id se singolo
+  "groupSize": 3,                      // atteso nel gruppo
+  "groupLabel": "analisi MiroFish",   // opzionale, da titolo batch
+  "groupMode": "barrier",             // "barrier" | "streaming" (futuro, default barrier)
+  // ... resto invariato (title, project, state, paneId, summary, changedFiles, ...)
+}
+// Persistenza gruppo per recovery restart Pi:
+// ~/.pi/fleet/.wake-groups/{groupId}.json
+// { groupId, expected, label, mode, pending:[ids], results:{id:{state, summary}} }
+```
+
+- `groupId` auto-generato dall'estensione se non passato: tutti i `fleet_launch` dello stesso turno LLM (o entro finestra 2–3s) condividono `grp-<date>-<rand6>`. Se `fleet_launch` passa `groupId` esplicito, vince quello (gruppi cross-turn).
+- `groupSize` = quanti task l'estensione ha lanciato nel batch (coordinatore in memoria, persistito per recovery).
+- Persistito anche `~/.pi/fleet/.wake-groups/{groupId}.json` per recovery dopo restart Pi: il coordinatore ricostruisce `pending` dai task su disco.
+
+### Come `fleet_status` mostra gruppi
+
+- **Riga singola**: se `task.groupSize > 1` → `- **Titolo** [done] (grp:grp-abc 2/3) — 5s fa — summary — /project` con `(grp:<shortId 8> done/total)` dove `total = groupSize`, `done = count terminali nel gruppo`.
+- **Raggruppamento**: se task hanno gruppi, output raggruppato per `groupId`:
+  ```
+  Gruppo a1b2c3d4 (analisi MiroFish) — 2/3 completi:
+    - Task A [done] (grp:a1b2c3d4 2/3)
+    - Task B [running] (grp:a1b2c3d4 2/3)
+    - Task C [done] (grp:a1b2c3d4 2/3)
+  Singoli:
+    - Task D [done]
+  ```
+  Usa `Map<groupId, Task[]>` e `GroupRecord` se disponibile, altrimenti raggruppa per `groupId` field.
+- **Filtro**: `fleet_status --group <id>` (o `fleet_status({groupId:"grp-..."})`) filtra `tasks.filter(t => (t.groupId ?? t.id) === groupId)`.
+- **Details**: `details: { tasks: clean, groups: groupSummaries }` dove `groupSummaries = [{groupId, label, expected, done, pendingIds}]` (da `loadGroups()`/`rebuildGroupsFromDisk()` o conteggio diretto se modulo assente).
+- Compatibilità: non rompe `tcs`, non rompe task singoli (`groupSize=1` non mostra `grp:`).
+
+### Componenti toccati
+
+| File | Ruolo L3.5 |
+|---|---|
+| `extensions/index.ts` | Genera `groupId` per batch, scrive `groupId/size` nel task json; `fleet_status` raggruppato + filtro + `grp:` |
+| `extensions/fleet-group.ts` | `loadGroups`/`rebuildGroupsFromDisk`/`formatGroupDigest`/`recordTaskDone` + persistenza `.wake-groups/` |
+| `extensions/fleet-watch-arm.ts` | Coordinatore barrier: `Map<groupId, {expected, pending, results}>`, bufferizza wake, emette digest quando `pending==0` (eccezione `needs_input` → flush immediato) |
+| `bin/fleet-watch.sh` | Classifica come prima; se task ha `groupId barrier` non scrive subito `.wake-queue` ma lascia decidere all'estensione (oppure scrive e l'estensione filtra prima di `sendMessage`) |
+| `bin/fleet-wake-drain.sh` | Drain ragionato per gruppo (opzionale `holdUntilGroupComplete`) |
+
+---
+
 ## State on Disk — `~/.pi/fleet/` layout
 
 ```

@@ -20,6 +20,16 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { mountFleetWatchArm } from "./fleet-watch-arm.js";
+import type { GroupRecord, GroupTaskInfo } from "./fleet-group.js";
+// L3.5 barrier — helpers opzionali caricati lazy per fail soft
+let _fleetGroup: typeof import("./fleet-group.js") | null = null;
+async function getFleetGroup(): Promise<typeof import("./fleet-group.js") | null> {
+  if (_fleetGroup) return _fleetGroup;
+  try { _fleetGroup = await import("./fleet-group.js"); return _fleetGroup; } catch { return null; }
+}
+function getFleetGroupSync(): typeof import("./fleet-group.js") | null {
+  return _fleetGroup;
+}
 
 const EXT_DIR = dirname(fileURLToPath(import.meta.url));
 const LAUNCHER = join(EXT_DIR, "..", "bin", "herdr-launch.sh");
@@ -27,6 +37,10 @@ const STATE_HOME = process.env.FLEET_STATE_HOME ?? join(homedir(), ".pi", "fleet
 const TASKS_DIR = join(STATE_HOME, "tasks");
 const WAKE_CHANNEL = "pi-fleet.wake.v1";
 const POLL_MS = 3000;
+// L3.5 batch window: tutti i fleet_launch dello stesso turno LLM (<3s) condividono lo stesso groupId
+let lastGroupId: string | null = null;
+let lastGroupTime = 0;
+let lastGroupSize = 0;
 
 const ACTIVE_STATES = new Set(["spawning", "running", "needs_input"]);
 
@@ -50,6 +64,10 @@ interface TaskStateFile {
   workspaceId?: string;
   summary?: string;
   changedFiles?: string[];
+  groupId?: string;
+  groupSize?: number;
+  groupLabel?: string;
+  groupMode?: "barrier" | "streaming";
 }
 
 function stateDir(): string {
@@ -182,6 +200,9 @@ interface FleetLaunchParams {
   model?: string;
   timeoutMin?: number;
   session?: string;
+  groupId?: string;
+  groupLabel?: string;
+  groupMode?: "barrier" | "streaming";
 }
 
 function spawnLauncher(taskId: string, title: string, briefPath: string, params: FleetLaunchParams): { ok: boolean; error?: string; logPath?: string } {
@@ -190,6 +211,11 @@ function spawnLauncher(taskId: string, title: string, briefPath: string, params:
   if (params.model) args.push("--model", params.model);
   if (params.timeoutMin) args.push("--timeout-min", String(params.timeoutMin));
   if (params.session) args.push("--session", params.session);
+  // L3.5: passa gruppo al launcher bash
+  const gid = (params as FleetLaunchParams & { effectiveGroupId?: string }).effectiveGroupId ?? params.groupId;
+  if (gid) args.push("--group-id", gid);
+  if (params.groupLabel) args.push("--group-label", params.groupLabel);
+  if (params.groupMode) args.push("--group-mode", params.groupMode);
 
   const logPath = join(STATE_HOME, `${taskId}.log`);
   try {
@@ -207,12 +233,45 @@ function spawnLauncher(taskId: string, title: string, briefPath: string, params:
 }
 
 // ------------------------------------------------------------ wake/report ----
-function formatTaskLine(t: TaskStateFile): string {
+function shortGroupId(gid: string): string {
+  return gid.replace(/^grp-/, "").slice(0, 8);
+}
+const TERMINAL_STATES_WAKE = new Set<TaskState>(["done", "failed", "aborted"]);
+function isTerminalStateWake(s: string): boolean { return TERMINAL_STATES_WAKE.has(s as TaskState); }
+function formatTaskLine(t: TaskStateFile, groupCounts?: Map<string, { done: number; total: number }>): string {
   const dur = t.startedAt ? ` (${Math.round((Date.now() - t.startedAt) / 1000)}s fa)` : "";
   const sum = t.summary && t.state !== "running" && t.state !== "spawning"
     ? ` — ${t.summary.length > 140 ? t.summary.slice(0, 137) + "…" : t.summary}`
     : "";
-  return `- **${t.title ?? t.id}** [${t.state}]${dur}${sum} — ${t.project ?? ""}`;
+  let grp = "";
+  if (t.groupId && (t.groupSize ?? 1) > 1) {
+    const c = groupCounts?.get(t.groupId);
+    if (c) grp = ` (grp:${shortGroupId(t.groupId)} ${c.done}/${c.total})`;
+    else grp = ` (grp:${shortGroupId(t.groupId)} ${t.groupSize})`;
+  } else if (t.groupId && t.groupLabel) {
+    grp = ` (grp:${shortGroupId(t.groupId)})`;
+  }
+  return `- **${t.title ?? t.id}** [${t.state}]${grp}${dur}${sum} — ${t.project ?? ""}`;
+}
+
+function sendGroupDigest(pi: ExtensionAPI, groupId: string, results: GroupTaskInfo[]): void {
+  let digest: string;
+  const mod = getFleetGroupSync();
+  if (mod) {
+    const label = results.find((r) => r.groupLabel)?.groupLabel;
+    try { digest = mod.formatGroupDigest(groupId, results, label); } catch { digest = fallbackDigest(groupId, results); }
+  } else {
+    digest = fallbackDigest(groupId, results);
+  }
+  const hasFailed = results.some((r) => r.state === "failed");
+  pi.sendMessage(
+    { customType: "fleet_notice", content: digest, display: true, details: { groupId, results } },
+    { triggerTurn: hasFailed, deliverAs: "followUp" },
+  );
+}
+function fallbackDigest(groupId: string, results: GroupTaskInfo[]): string {
+  const lines = results.map((r) => `## ${r.title ?? r.id} [${r.state}]\n${(r.summary ?? "").trim() || "(nessuna summary)"}`).join("\n\n");
+  return `⚑ pi-fleet — gruppo ${groupId} completo (${results.length}/${results.length})\n${lines}`;
 }
 
 function sendWake(pi: ExtensionAPI, task: TaskStateFile): void {
@@ -288,17 +347,61 @@ async function reconcileStaleTasks(): Promise<void> {
   }
 }
 
+// L3.5 barrier: mappa gruppi a livello modulo (condivisa tra rebuild e watcher)
+const groupMap: Map<string, GroupRecord> = new Map();
+// preload barrier module async (best-effort, sync fallback usa fallbackDigest)
+void getFleetGroup().catch(() => {});
+
 function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => void {
   // Seed: gli stati GIÀ presenti all'avvio non devono fare wake (niente
   // notifiche fantasma per task finiti/finiti prima che il watcher parta).
   for (const task of listTasks()) watch.set(task.id, task.state);
+  // L3.5: carica gruppi da disco se modulo disponibile (sync path)
+  try {
+    const mod = getFleetGroupSync();
+    if (mod) {
+      const rebuilt = mod.rebuildGroupsFromDisk(STATE_HOME, listTasks());
+      for (const [k, v] of rebuilt) groupMap.set(k, v);
+    }
+  } catch { /* fail soft */ }
 
   const timer = setInterval(() => {
     for (const task of listTasks()) {
       const prev = watch.get(task.id);
-      if (prev !== task.state && (task.state === "failed" || task.state === "needs_input" || task.state === "done")) {
-        watch.set(task.id, task.state);
-        sendWake(pi, task);
+      const isTerminal = task.state === "failed" || task.state === "needs_input" || task.state === "done";
+      if (prev !== task.state && isTerminal) {
+        // L3.5 barrier logic
+        const mod = getFleetGroupSync();
+        const hasGroup = !!(task.groupId && (task.groupSize ?? 1) > 1 && (task.groupMode ?? "barrier") === "barrier");
+        if (mod && hasGroup) {
+          try {
+            if (task.state === "needs_input") {
+              // needs_input rompe barrier: wake immediato + registra per consistenza
+              try { mod.recordTaskDone(STATE_HOME, groupMap, task); } catch { /* ignore */ }
+              watch.set(task.id, task.state);
+              sendWake(pi, task);
+            } else {
+              const ev = mod.recordTaskDone(STATE_HOME, groupMap, task);
+              if (ev.kind === "buffered") {
+                watch.set(task.id, task.state);
+                // non svegliare, solo aggiorna watch.set
+              } else if (ev.kind === "group_complete") {
+                watch.set(task.id, task.state);
+                sendGroupDigest(pi, ev.groupId, ev.results);
+              } else if (ev.kind === "needs_input") {
+                watch.set(task.id, task.state);
+                sendWake(pi, task);
+              }
+            }
+          } catch {
+            watch.set(task.id, task.state);
+            sendWake(pi, task);
+          }
+        } else {
+          // singolo o streaming o modulo non disponibile → wake immediato
+          watch.set(task.id, task.state);
+          sendWake(pi, task);
+        }
       } else {
         watch.set(task.id, task.state);
       }
@@ -355,7 +458,13 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       worktree: Type.Optional(Type.Boolean({ description: "Usa una worktree treehouse isolata (default: true)" })),
       model: Type.Optional(Type.String({ description: "Override modello, es. 'opencode-go/deepseek-v4-flash' (default: modello della sessione parent)" })),
       timeoutMin: Type.Optional(Type.Number({ description: "Timeout in minuti (default: 360)" })),
+      groupId: Type.Optional(Type.String({ description: "Group id for barrier digest (e.g. grp-20260828-a1b2c3). Auto-generated via batch window if omitted." })),
+      groupLabel: Type.Optional(Type.String({ description: "Optional label for the group (shown in digest)" })),
+      groupMode: Type.Optional(Type.String({ description: "Group mode: barrier (wait all) or streaming (per-task). Default barrier." })),
     }),
+    // L3.5: se lanci N in parallelo nello stesso turno, riusa stesso groupId (auto-batch)
+    // La guideline aiuta il modello a passare groupId esplicito se vuole gruppi separati.
+
     async execute(_toolCallId: string, params: FleetLaunchParams, _signal?: unknown, _onUpdate?: unknown, ctx?: { model?: { id?: string } }) {
       const resolved = resolveProject(params.project);
       if (!resolved.ok) {
@@ -375,6 +484,27 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       const briefPath = join(TASKS_DIR, `${id}.brief.md`);
       writeFileSync(briefPath, params.brief);
 
+      // L3.5 batch window: auto-gruppo per lanci ravvicinati (<3s)
+      let effectiveGroupId: string | undefined = params.groupId;
+      if (!effectiveGroupId) {
+        if (lastGroupId && Date.now() - lastGroupTime < 3000) {
+          effectiveGroupId = lastGroupId;
+          lastGroupSize += 1;
+          lastGroupTime = Date.now();
+        } else {
+          effectiveGroupId = `grp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+          lastGroupId = effectiveGroupId;
+          lastGroupTime = Date.now();
+          lastGroupSize = 1;
+        }
+      } else {
+        lastGroupId = effectiveGroupId;
+        lastGroupTime = Date.now();
+        lastGroupSize = 1;
+      }
+      // groupLabel/mode presi da params se presenti
+      const effectiveGroupMode = (params.groupMode as "barrier" | "streaming" | undefined) ?? "barrier";
+
       const task: TaskStateFile = {
         id,
         title: params.title,
@@ -384,10 +514,14 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         lastBeatAt: Date.now(),
         doneAt: null,
         timeoutMs: (params.timeoutMin ?? 360) * 60000,
+        groupId: effectiveGroupId,
+        groupSize: 1, // placeholder — il coordinatore conta reale su disco, o si aggiorna via batch
+        groupLabel: params.groupLabel,
+        groupMode: effectiveGroupMode,
       };
       writeTask(task);
 
-      const launchParams = { ...params, project };
+      const launchParams = { ...params, project, effectiveGroupId } as FleetLaunchParams & { effectiveGroupId?: string };
       // Eredita il modello ATTIVO della sessione main (ctx.model.id): le env
       // PI_MODEL/PI_DEFAULT_MODEL sono statiche all'avvio e NON seguono i
       // cambi a metà sessione (/model, Ctrl+P). model esplicito dell'utente vince.
@@ -421,18 +555,79 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fleet_status",
     label: "Fleet Status",
-    description: "Lista tutti i task pi-fleet con stato, progetto e pane herdr.",
+    description: "Lista tutti i task pi-fleet con stato, progetto e pane herdr. Supporta filtro per gruppo e mostra avanzamento grp:xxx done/total.",
     promptSnippet: "List active pi-fleet tasks and their states",
     parameters: Type.Object({
       limit: Type.Optional(Type.Number({ description: "Max righe (default: 30)" })),
+      groupId: Type.Optional(Type.String({ description: "Filtra per gruppo (groupId completo o prefisso 8)" })),
     }),
-    async execute(_toolCallId, params: { limit?: number }) {
-      const tasks = listTasks().slice(0, params.limit ?? 30);
+    async execute(_toolCallId, params: { limit?: number; groupId?: string }) {
+      let allTasks = listTasks();
+      // filtro per gruppo se richiesto — matcha groupId o fallback id per singoli
+      if (params.groupId) {
+        const gid = params.groupId;
+        allTasks = allTasks.filter((t) => (t.groupId ?? t.id) === gid || (t.groupId ?? "").startsWith(gid) || t.id === gid);
+      }
+      const tasks = allTasks.slice(0, params.limit ?? 30);
+      // groupCounts per formatTaskLine (done/total)
+      let groupCounts: Map<string, { done: number; total: number }> | undefined;
+      let groupSummaries: Array<{ groupId: string; label?: string; expected: number; done: number; pendingIds: string[] }> = [];
+      try {
+        const mod = getFleetGroupSync();
+        if (mod && typeof (mod as unknown as { buildGroupSummaries?: unknown }).buildGroupSummaries === "function") {
+          const fn = (mod as unknown as { buildGroupSummaries: (tasks: unknown[]) => typeof groupSummaries }).buildGroupSummaries;
+          groupSummaries = fn(allTasks as unknown as Array<{ id: string; state: string; groupId?: string; groupSize?: number; groupLabel?: string }>);
+          groupCounts = new Map(groupSummaries.map((g) => [g.groupId, { done: g.done, total: g.expected }]));
+        } else {
+          // fallback: raggruppa per groupId contando terminal
+          const byGroup = new Map<string, TaskStateFile[]>();
+          for (const t of allTasks) {
+            if (!t.groupId || (t.groupSize ?? 1) <= 1) continue;
+            if (!byGroup.has(t.groupId)) byGroup.set(t.groupId, []);
+            byGroup.get(t.groupId)!.push(t);
+          }
+          for (const [gid, members] of byGroup) {
+            const expected = Math.max(members[0]?.groupSize ?? members.length, members.length);
+            const done = members.filter((m) => isTerminalStateWake(m.state)).length;
+            const pendingIds = members.filter((m) => !isTerminalStateWake(m.state)).map((m) => m.id);
+            groupSummaries.push({ groupId: gid, label: members[0]?.groupLabel, expected, done, pendingIds });
+          }
+          groupCounts = new Map(groupSummaries.map((g) => [g.groupId, { done: g.done, total: g.expected }]));
+        }
+      } catch { /* ignore */ }
       const clean = tasks.map((t) => ({ ...t, briefFile: undefined as string | undefined }));
-      const lines = tasks.length ? tasks.map(formatTaskLine) : ["(nessun task)"];
+      let text: string;
+      const hasGroups = tasks.some((t) => t.groupId && (t.groupSize ?? 1) > 1);
+      if (hasGroups && !params.groupId) {
+        // output raggruppato per gruppo
+        const byGroup = new Map<string, TaskStateFile[]>();
+        const singles: TaskStateFile[] = [];
+        for (const t of tasks) {
+          if (t.groupId && (t.groupSize ?? 1) > 1) {
+            if (!byGroup.has(t.groupId)) byGroup.set(t.groupId, []);
+            byGroup.get(t.groupId)!.push(t);
+          } else singles.push(t);
+        }
+        const lines: string[] = [];
+        for (const [gid, members] of byGroup) {
+          const g = groupSummaries.find((x) => x.groupId === gid);
+          const label = g?.label ? ` (${g.label})` : "";
+          const prog = g ? `${g.done}/${g.expected}` : `${members.length}`;
+          lines.push(`**Gruppo ${shortGroupId(gid)}${label} — ${prog} completi:**`);
+          for (const m of members) lines.push(`  ${formatTaskLine(m, groupCounts)}`);
+        }
+        if (singles.length) {
+          lines.push(`**Singoli:**`);
+          for (const s of singles) lines.push(`  ${formatTaskLine(s, groupCounts)}`);
+        }
+        text = `**Flotta pi-fleet (${tasks.length})**:\n${lines.join("\n")}\n\nDettagli strutturati in details.`;
+      } else {
+        const lines = tasks.length ? tasks.map((t) => formatTaskLine(t, groupCounts)) : ["(nessun task)"];
+        text = `**Flotta pi-fleet (${tasks.length})**:\n${lines.join("\n")}\n\nDettagli strutturati in details.`;
+      }
       return {
-        content: [{ type: "text", text: `**Flotta pi-fleet (${tasks.length})**:\n${lines.join("\n")}\n\nDettagli strutturati in details.` }],
-        details: { tasks: clean },
+        content: [{ type: "text", text }],
+        details: { tasks: clean, groups: groupSummaries },
       };
     },
   });
@@ -584,6 +779,16 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", () => {
     if (!IS_CAPTAIN) return;
+    // L3.5: ricostruisci gruppi da disco (anche se watcher esterno monta, serve per fallback)
+    void (async () => {
+      try {
+        const mod = await getFleetGroup();
+        if (mod) {
+          const rebuilt = mod.rebuildGroupsFromDisk(STATE_HOME, listTasks());
+          for (const [k, v] of rebuilt) groupMap.set(k, v);
+        }
+      } catch { /* fail soft */ }
+    })();
     if (externalMounted) {
       // Esterno già gestito da mountFleetWatchArm (generation + arm + drain interni)
       // Solo reconcile stale task per non lasciare zombie .json

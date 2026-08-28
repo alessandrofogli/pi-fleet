@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # pi-fleet · wake drain — svuota la coda durabile dei wake (~/.pi/fleet/.wake-queue)
+# L3.5 group barrier: mostra anche STATE/.wake-groups/*.json come GROUP pending
 #
 # Queue record formato (scritto da fleet-watch.sh):
 #   {"seq": 1234567890123, "taskId": "abc-123", "reason": "signal: abc.done", "createdAt": 1724800000}
@@ -58,6 +59,22 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "$QUEUE"
+
+# L3.5 group info (best-effort, non blocca drain)
+GROUP_DIR="$STATE/.wake-groups"
+if [[ -d "$GROUP_DIR" ]]; then
+  for gf in "$GROUP_DIR"/*.json; do
+    [[ -e "$gf" ]] || continue
+    gid=$(jq -r '.groupId // empty' "$gf" 2>/dev/null || echo "")
+    [[ -n "$gid" ]] || gid=$(basename "$gf" .json)
+    pending=$(jq -r '.pending | length // 0' "$gf" 2>/dev/null || echo "?")
+    expected=$(jq -r '.expected // "?"' "$gf" 2>/dev/null || echo "?")
+    # stampa su stderr per non rompere --json/--count, ma visibile in drain default
+    if [[ "$OUTPUT_JSON" != 1 && "$OUTPUT_COUNT" != 1 ]]; then
+      echo "GROUP $gid pending $pending/$expected" >&2
+    fi
+  done
+fi
 
 # Recovery generation check (compatibilità, non blocca)
 if [[ -n "$RECOVERY_GEN" ]]; then

@@ -19,6 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import type { GroupRecord, GroupTaskInfo } from "./fleet-group.js";
 
 // ---------------------------------------------------------------- tipi ----
 type ArmResult = { ok: boolean; message: string };
@@ -196,6 +197,34 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
   let generation = createGeneration();
   activateGeneration(generation);
 
+  // L3.5 barrier: mappa gruppi + lazy loader fail-soft
+  const groupMap: Map<string, GroupRecord> = new Map();
+  let _fleetGroup: typeof import("./fleet-group.js") | null = null;
+  async function getFleetGroup(): Promise<typeof import("./fleet-group.js") | null> {
+    if (_fleetGroup) return _fleetGroup;
+    try { _fleetGroup = await import("./fleet-group.js"); return _fleetGroup; } catch { return null; }
+  }
+  function getFleetGroupSync(): typeof import("./fleet-group.js") | null { return _fleetGroup; }
+  void getFleetGroup().catch(() => {});
+  // rebuild iniziale best-effort (sync se già caricato, altrimenti async)
+  void (async () => {
+    try {
+      const mod = await getFleetGroup();
+      if (!mod) return;
+      // scansiona task json per rebuild
+      const { readdirSync, readFileSync } = await import("node:fs");
+      let names: string[] = [];
+      try { names = readdirSync(stateHome); } catch { return; }
+      const tasks: unknown[] = [];
+      for (const n of names) {
+        if (!n.endsWith(".json") || n.endsWith(".done.json") || n.endsWith(".needs-input.json") || n.startsWith(".")) continue;
+        try { tasks.push(JSON.parse(readFileSync(join(stateHome, n), "utf8"))); } catch { /* skip */ }
+      }
+      const rebuilt = mod.rebuildGroupsFromDisk(stateHome, tasks as Parameters<typeof mod.rebuildGroupsFromDisk>[1]);
+      for (const [k, v] of rebuilt) groupMap.set(k, v);
+    } catch { /* ignore */ }
+  })();
+
   // ------------------------- helpers chiusi su opts/stateHome/armScript ----
 
   function encodeWake(message: string): string {
@@ -249,6 +278,32 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
     return confirmHandlingDelivery(snapshot());
   }
 
+  function parseTaskIdFromMessage(msg: string): string | null {
+    // signal: <id>.done | signal: <id>.needs-input | signal: <id> failed | stale: <id> ...
+    const m = msg.match(/^(?:signal:|stale:)\s*([^\s.]+)(?:\.|\s|$)/);
+    return m ? m[1] : null;
+  }
+
+  async function sendGroupDigestWake(owner: SessionGeneration, groupId: string, results: GroupTaskInfo[], drainExtra: string): Promise<void> {
+    const mod = getFleetGroupSync();
+    let digest: string;
+    if (mod) {
+      const label = results.find((r) => r.groupLabel)?.groupLabel;
+      try { digest = mod.formatGroupDigest(groupId, results, label); } catch { digest = `⚑ pi-fleet — gruppo ${groupId} completo (${results.length})` ; }
+    } else {
+      digest = `⚑ pi-fleet — gruppo ${groupId} completo (${results.length})`;
+    }
+    const full = `${digest}${drainExtra}`;
+    // usa sendWake con triggerTurn = almeno un failed
+    if (!generationIsLive(owner)) return;
+    const hasFailed = results.some((r) => r.state === "failed");
+    const content = `${full}`;
+    await (pi as unknown as { sendMessage: (msg: unknown, opts: unknown) => Promise<void> }).sendMessage(
+      { customType: "fleet_notice", content, display: true, details: { groupId, results, source: "fleet-watch-arm-group" } },
+      { triggerTurn: hasFailed, deliverAs: "followUp" },
+    );
+  }
+
   async function deliverActionableWake(
     owner: SessionGeneration,
     message: string,
@@ -256,7 +311,63 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
     recovery?: { generation: string; watcherPid: string },
   ): Promise<void> {
     if (!generationIsLive(owner)) return;
-    // Drain opzionale prima del wake (se Pi era chiuso la coda contiene wake pendenti)
+    // L3.5 barrier: se messaggio è per task di gruppo barrier, bufferizza
+    const taskId = parseTaskIdFromMessage(message);
+    if (taskId) {
+      const mod = getFleetGroupSync() ?? await getFleetGroup();
+      if (mod) {
+        try {
+          // leggi task json da disco per capire groupId/mode
+          let task: Record<string, unknown> | null = null;
+          try {
+            const raw = readFileSync(join(stateHome, `${taskId}.json`), "utf8");
+            task = JSON.parse(raw) as Record<string, unknown>;
+          } catch { /* task non letto, fallback a wake singolo */ }
+          if (task && task["groupId"] && (task["groupSize"] as number) > 1 && (task["groupMode"] ?? "barrier") === "barrier") {
+            const state = String(task["state"] ?? "");
+            if (state === "needs_input") {
+              // needs_input rompe barrier → wake immediato (non bufferizzare)
+              try { mod.recordTaskDone(stateHome, groupMap, task as unknown as Parameters<typeof mod.recordTaskDone>[2]); } catch { /* ignore */ }
+              // continua al flusso normale (consegna wake)
+            } else if (state === "done" || state === "failed") {
+              const ev = mod.recordTaskDone(stateHome, groupMap, task as unknown as Parameters<typeof mod.recordTaskDone>[2]);
+              if (ev.kind === "buffered") {
+                // barrier: non consegnare wake singolo, successore già riarmato da restoreAfterActionableClose
+                // Conferma handling se presente, poi esci senza sendMessage
+                if (recovery) {
+                  const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
+                  if (!confirmed.ok && !pidAlive(recovery.watcherPid)) await retireArm(owner.child);
+                }
+                return;
+              }
+              if (ev.kind === "group_complete") {
+                // Drain opzionale
+                let drainExtra = "";
+                if (existsSync(drainScript)) {
+                  try {
+                    const d = spawnSync("bash", [drainScript], { cwd: root, encoding: "utf8", env: { ...process.env, FLEET_STATE_HOME: stateHome, FLEET_ROOT_OVERRIDE: root }, timeout: 5000 });
+                    const out = (d.stdout || "").trim();
+                    if (out) drainExtra = `\n\n[drain] ${out.slice(0, 2000)}`;
+                  } catch { /* ignore */ }
+                }
+                if (recovery) {
+                  const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
+                  if (!confirmed.ok) {
+                    if (!pidAlive(recovery.watcherPid)) await retireArm(owner.child);
+                    await sendWake(owner, `${message}${drainExtra}\n\n${confirmed.detail}`);
+                    return;
+                  }
+                }
+                await sendGroupDigestWake(owner, ev.groupId, ev.results, drainExtra);
+                void repairFailed;
+                return;
+              }
+            }
+          }
+        } catch { /* fail soft → wake singolo */ }
+      }
+    }
+    // Fallback: wake singolo (retrocompatibile)
     let drainExtra = "";
     if (existsSync(drainScript)) {
       try {
@@ -282,7 +393,6 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
       }
     }
     await sendWake(owner, `${message}${drainExtra}`);
-    // repairFailed è informativo: se il riarmo è fallito il messaggio contiene già il failure
     void repairFailed;
   }
 

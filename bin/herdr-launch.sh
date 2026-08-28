@@ -27,6 +27,9 @@ USE_WORKTREE=1
 TIMEOUT_MIN=360
 TASK_ID_OVERRIDE=""
 MODEL_OVERRIDE=""
+GROUP_ID=""
+GROUP_LABEL=""
+GROUP_MODE="barrier"
 TITLE=""
 BRIEF=""
 
@@ -38,6 +41,9 @@ while [[ $# -gt 0 ]]; do
     --task-id) TASK_ID_OVERRIDE="$2"; shift 2 ;;
     --model) MODEL_OVERRIDE="$2"; shift 2 ;;
     --session) SESSION="$2"; shift 2 ;;
+    --group-id) GROUP_ID="$2"; shift 2 ;;
+    --group-label) GROUP_LABEL="$2"; shift 2 ;;
+    --group-mode) GROUP_MODE="$2"; shift 2 ;;
     --debug) FM_DEBUG=1; shift ;;
     -h|--help) sed -n '1,24p' "$0"; exit 0 ;;
     *)
@@ -181,6 +187,8 @@ DONE_PATH="$STATE_HOME/$TASK_ID.done.json"
 NEEDS_INPUT_PATH="$STATE_HOME/$TASK_ID.needs-input.json"
 
 printf '%s\n' "$BRIEF_CONTENT" > "$BRIEF_PATH"
+# L3.5 group fields — GROUP_ID vuoto → usa TASK_ID (singolo), GROUP_SIZE placeholder 1
+EFFECTIVE_GROUP_ID="${GROUP_ID:-$TASK_ID}"
 cat > "$STATE_JSON.tmp" <<EOF
 {
   "id": "$TASK_ID",
@@ -193,11 +201,16 @@ cat > "$STATE_JSON.tmp" <<EOF
   "startedAt": $(date +%s)000,
   "lastBeatAt": $(date +%s)000,
   "doneAt": null,
-  "timeoutMs": $((TIMEOUT_MIN * 60000))
+  "timeoutMs": $((TIMEOUT_MIN * 60000)),
+  "groupId": $(jq -Rn --arg v "$EFFECTIVE_GROUP_ID" '$v'),
+  "groupSize": 1,
+  "groupLabel": $(jq -Rn --arg v "${GROUP_LABEL:-}" '$v'),
+  "groupMode": "${GROUP_MODE:-barrier}"
 }
 EOF
 mv "$STATE_JSON.tmp" "$STATE_JSON"  # atomico: niente letture a metà da parte del watcher
 log "stato: $STATE_JSON"
+if [[ -n "${GROUP_ID:-}" ]]; then log "gruppo: $GROUP_ID ($GROUP_MODE)"; fi
 
 # ------------------------------------------------------- 4. tab herdr ----
 TB_OUT="$(herdr_cli tab create --workspace "$WORKSPACE" --cwd "$TASK_CWD" --label "$TASK_ID" --no-focus)"
