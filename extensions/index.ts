@@ -106,27 +106,50 @@ function slugify(s: string, max = 30): string {
 }
 
 /**
- * Risolve il progetto del task. Il main agent sta in ~ e i progetti vivono in
- * ~/Documents/GitHub: accettiamo un NOME ("MiroFish-private") o un path assoluto.
+ * Resolve the task project. Accepts an absolute path, a ~/ path, or a short
+ * name. Short names are resolved against FLEET_PROJECTS_DIR if set
+ * (e.g. export FLEET_PROJECTS_DIR=~/projects). Otherwise an absolute path
+ * is required — this keeps the plugin generic and not tied to any directory
+ * layout. Example: project: "my-app" with FLEET_PROJECTS_DIR=~/code
+ * resolves to ~/code/my-app.
  */
 function resolveProject(raw: string): { ok: true; path: string } | { ok: false; error: string } {
-  if (raw.startsWith("/")) {
-    if (existsSync(raw)) return { ok: true, path: raw };
-    return { ok: false, error: `Percorso non trovato: ${raw}` };
+  const expanded = raw.startsWith("~") ? join(homedir(), raw.slice(1)) : raw;
+  if (expanded.startsWith("/")) {
+    if (existsSync(expanded)) return { ok: true, path: expanded };
+    return { ok: false, error: `Path not found: ${expanded}` };
   }
-  const gh = join(homedir(), "Documents", "GitHub", raw);
-  if (existsSync(gh)) return { ok: true, path: gh };
-  let available = "";
-  try {
-    const hub = join(homedir(), "Documents", "GitHub");
-    available = readdirSync(hub)
-      .filter((d) => { try { return statSync(join(hub, d)).isDirectory(); } catch { return false; } })
-      .slice(0, 15)
-      .join(", ");
-  } catch { /* ignore */ }
+  const rootEnv = process.env.FLEET_PROJECTS_DIR;
+  const roots: string[] = [];
+  if (rootEnv) {
+    roots.push(rootEnv.startsWith("~") ? join(homedir(), rootEnv.slice(1)) : rootEnv);
+  } else {
+    // Back-compat fallback for existing setups that used ~/Documents/GitHub.
+    // New setups should set FLEET_PROJECTS_DIR explicitly (see README).
+    const legacy = join(homedir(), "Documents", "GitHub");
+    if (existsSync(legacy)) roots.push(legacy);
+  }
+  if (roots.length > 0) {
+    for (const root of roots) {
+      const candidate = join(root, raw);
+      if (existsSync(candidate)) return { ok: true, path: candidate };
+    }
+    const root = roots[0];
+    let available = "";
+    try {
+      available = readdirSync(root)
+        .filter((d) => { try { return statSync(join(root, d)).isDirectory(); } catch { return false; } })
+        .slice(0, 15)
+        .join(", ");
+    } catch { /* ignore */ }
+    return {
+      ok: false,
+      error: `Project '${raw}' not found in ${root}. Available: ${available || "(empty)"} — use an absolute path or set FLEET_PROJECTS_DIR (e.g. export FLEET_PROJECTS_DIR=~/projects).`,
+    };
+  }
   return {
     ok: false,
-    error: `Progetto '${raw}' non trovato in ~/Documents/GitHub. Usa un nome tra: ${available || "(cartella vuota)"} — oppure un path assoluto.`,
+    error: `Project '${raw}' requires an absolute path (e.g. /home/user/projects/${raw}) or set FLEET_PROJECTS_DIR to enable short-name lookup (e.g. export FLEET_PROJECTS_DIR=~/projects).`,
   };
 }
 
@@ -357,15 +380,15 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       "Spawna un sub-agent VISIBILE: crea un tab herdr con pi dentro (stesso modello della sessione main), in una worktree treehouse isolata, gli consegna il brief e libera la chat. A fine task il report arriva nella chat (successo senza interruzione; failed/needs_input risvegliano il main agent nel turno).",
     promptSnippet: "Spawn a visible herdr tab sub-agent for a delegation task",
     promptGuidelines: [
-      "AUTOMATICALLY call fleet_launch for ANY non-trivial request about a project (~/Documents/GitHub): reading/analyzing, editing, implementing, fixing, testing, refactoring. Do NOT wait for the user to type fleet_launch and do NOT ask for confirmation — delegation is the default. Handle inline ONLY questions answerable from context, fleet management, and trivial one-liners.",
-      "project is REQUIRED: derive it from the user's message (e.g. 'mirofish' -> 'MiroFish-private') or the last task's project; ask one short question only if truly ambiguous. Never launch without project. Keep worktree enabled.",
+      "AUTOMATICALLY call fleet_launch for ANY non-trivial request about a project: reading/analyzing, editing, implementing, fixing, testing, refactoring. Do NOT wait for the user to type fleet_launch and do NOT ask for confirmation — delegation is the default. Handle inline ONLY questions answerable from context, fleet management, and trivial one-liners.",
+      "project is REQUIRED (absolute path, ~/path, or short name if FLEET_PROJECTS_DIR is set): derive it from the user's message or the last task's project; ask one short question only if truly ambiguous. Never launch without project. Keep worktree enabled.",
       "For multiple independent requests, launch them in PARALLEL (max 5 per turn) instead of sequentially.",
       "After launching, END YOUR TURN IMMEDIATELY. Do NOT poll, monitor, or re-check with fleet_status/fleet_peek — the report is delivered to the chat automatically (silent on done, waking on failed/needs_input). The chat is free until then.",
     ],
     parameters: Type.Object({
       title: Type.String({ description: "Breve titolo del task" }),
       brief: Type.String({ description: "Istruzioni complete del task (markdown)" }),
-      project: Type.String({ description: "Progetto: NOME in ~/Documents/GitHub (es. 'MiroFish-private') o path assoluto. OBBLIGATORIO." }),
+      project: Type.String({ description: "Project: absolute path (e.g. /home/user/projects/my-app or ~/projects/my-app) or short name if FLEET_PROJECTS_DIR is set. REQUIRED." }),
       worktree: Type.Optional(Type.Boolean({ description: "Usa una worktree treehouse isolata (default: true)" })),
       model: Type.Optional(Type.String({ description: "Override modello, es. 'opencode-go/deepseek-v4-flash' (default: modello della sessione parent)" })),
       timeoutMin: Type.Optional(Type.Number({ description: "Timeout in minuti (default: 360)" })),

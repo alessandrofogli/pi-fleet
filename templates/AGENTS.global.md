@@ -1,39 +1,39 @@
-# Pi — Istruzioni globali dell'agente
+# Pi — Global agent instructions
 
-## Politica di delega (pi-fleet) — DELEGA AUTOMATICA
+## Delegation policy (pi-fleet) — AUTOMATIC DELEGATION
 
-**Regola d'oro**: quando l'utente ti chiede di FARE qualcosa (leggere/analizzare un progetto, modificare codice, implementare, fixare, testare, refactoring, ricerca nel codebase), **chiama subito `fleet_launch` automaticamente** — senza aspettare che l'utente scriva `fleet_launch`, senza chiedere conferma, senza chiedere "vuoi che lo lanci come subagent?". La delega è il default; l'inline è l'eccezione.
+**Golden rule**: when the user asks you to DO something (read/analyze a project, modify code, implement, fix, test, refactor, research the codebase), **immediately call `fleet_launch` automatically** — without waiting for the user to type `fleet_launch`, without asking for confirmation, without asking "should I launch it as a sub-agent?". Delegation is the default; inline is the exception.
 
-### Quando rispondere inline (NON delegare)
-Solo se rientra in uno di questi casi:
-- **Domande risolvibili dal contesto corrente** (spiegazioni, "che modello usi?", confronti di ciò che è già in chat, riepilogo di un report già arrivato).
-- **Gestione della flotta** (fleet_status/peek/steer/abort/attach).
-- **Amministrazione** su `~` (config, installare estensioni aggiornate, questo AGENTS.md).
-- Correzioni banali a riga singola *nel file su cui si sta già lavorando in questo stesso turno* senza bisogno di isolamento.
+### When to answer inline (DO NOT delegate)
+Only if the request falls into one of these cases:
+- **Questions answerable from current context** (explanations, "which model are you using?", comparisons of what's already in the chat, summary of a report that already arrived).
+- **Fleet management** (fleet_status/peek/steer/abort/attach).
+- **Administration** in `~` (config, installing/updating extensions, this AGENTS.md).
+- Trivial single-line fixes *in the file you're already working on in this same turn* without need for isolation.
 
-### Quando delegare (SEMPRE, automatico)
-- **Qualsiasi lavoro su un progetto** in `~/Documents/GitHub/`: anche solo leggere/analizzare ("guarda MiroFish e dimmi…"), e ovviamente modificare, implementare, fixare, testare, refactoring.
-- Richieste che richiedono più di una risposta secca o più di un tool call sul progetto.
-- Più task indipendenti → **lanciarli in parallelo** (max 5 per turno; turni successivi senza limite), non in sequenza.
-- Non fare il lavoro tu stesso "perché è piccolo": se tocca un progetto, delegalo. Il figlio lavora in parallelo e la chat resta libera.
+### When to delegate (ALWAYS, automatic)
+- **Any work on a project**: even just reading/analyzing ("look at my-app and tell me…"), and of course modifying, implementing, fixing, testing, refactoring.
+- Requests that require more than a one-liner answer or more than one tool call on the project.
+- Multiple independent tasks → **launch them in parallel** (max 5 per turn; subsequent turns uncapped), not sequentially.
+- Don't do the work yourself "because it's small": if it touches a project, delegate it. The child works in parallel and the chat stays free.
 
-### Come compilare `fleet_launch`
-- `title`: breve etichetta del task.
-- `brief`: istruzioni complete (obiettivo, vincoli, deliverable, lingua italiana, cosa NON fare).
-- `project` (SEMPRE obbligatorio): ricava il NOME dal messaggio dell'utente ("mirofish" → `MiroFish-private`) o dal progetto dell'ultimo task/report; se proprio ambiguo e non indovinabile, fai UNA domanda breve. Mai lanciare senza project.
-- `timeoutMin`: default 360; ridurlo per task leggibili velocemente, aumentarlo se serve.
-- NON settare `worktree: false` salvo giustificazione esplicita (default: isolamento treehouse).
+### How to fill `fleet_launch`
+- `title`: short task label.
+- `brief`: complete instructions (goal, constraints, deliverable, what NOT to do).
+- `project` (ALWAYS required): use the absolute path (`/home/user/projects/my-app`, `~/projects/my-app`) or, if `FLEET_PROJECTS_DIR` is set, a short name resolved against it (e.g. with `FLEET_PROJECTS_DIR=~/projects`, `my-app` → `~/projects/my-app`). If truly ambiguous and not inferable, ask ONE short question. Never launch without project.
+- `timeoutMin`: default 360; lower for quick read-only tasks, raise if needed.
+- Do NOT set `worktree: false` unless explicitly justified (default: treehouse isolation).
 
-### Quando il task finisce
-- Dopo ogni `fleet_launch`, **CHIUDI SUBITO il turno**: la chat è libera, NON fare polling con `fleet_status`/`fleet_peek` per monitorare il lavoro. Il report arriva da solo in chat (done senza interruzione; failed/needs_input svegliano davvero). Usa `fleet_status`/`fleet_peek` SOLO se l'utente li chiede o se un report failed lo richiede.
-- Il report del done arriva in chat da solo (followUp, senza interruzione). **Il report è già completo nel messaggio: NON riscriverlo né espanderlo.** Conferma in 1-2 righe e proponi i prossimi passi; il dettaglio integrale resta in `fleet_status <id>`.
-- Se il task ha modificato file, riporta la lista e **offri** una PR (parte solo su conferma esplicita).
-- Se è `failed`: riassumi la causa e proponi il fix/rilancio.
-- Se è `needs_input`: rispondi con `fleet_steer` e fai ripartire il figlio.
-- **Mai merge automatici. Mai lanciare tool senza project. Warn obbligatorio se un task parte da `~` senza progetto.**
+### When the task finishes
+- After each `fleet_launch`, **CLOSE the turn immediately**: the chat is free, do NOT poll with `fleet_status`/`fleet_peek` to monitor. The report arrives on its own in the chat (done without interruption; failed/needs_input really wake you). Use `fleet_status`/`fleet_peek` ONLY if the user asks for them or a failed report requires it.
+- The done report arrives on its own in the chat (followUp, no interruption). **The report is already complete in the message: DO NOT rewrite or expand it.** Confirm in 1-2 lines and propose next steps; full details remain in `fleet_status <id>`.
+- If the task changed files, list them and **offer** a PR (only on explicit confirmation).
+- If `failed`: summarize the cause and propose a fix/retry.
+- If `needs_input`: answer with `fleet_steer` and resume the child.
+- **Never auto-merge. Never launch a tool without project.**
 
-## Regole di flotta (riferimento)
-- Il main agent sta in `~` (HOME). I progetti si raggiungono per NOME da `~/Documents/GitHub/`.
-- Ogni task gira in una worktree treehouse isolata; niente lavoro sul working tree condiviso per task paralleli.
-- Successo = report in chat senza interruzione LLM; failed/needs_input = wake con triggerTurn. Niente wake per abort volontario.
-- Solo `pi` nei tab (niente claude/codex).
+## Fleet rules (reference)
+- The main agent stays in `~` (HOME). Projects are reached via `FLEET_PROJECTS_DIR` if set (e.g. `~/projects`), otherwise via absolute paths.
+- Each task runs in an isolated treehouse worktree; never work on the shared working tree for parallel tasks.
+- Success = report in chat without LLM interruption; failed/needs_input = wake with triggerTurn. No wake for voluntary abort.
+- Only `pi` tabs (no claude/codex).
