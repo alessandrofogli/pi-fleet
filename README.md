@@ -191,6 +191,19 @@ State on disk in `~/.pi/fleet/`: `<id>.json` (state, title, project, cwd, pane/t
 - **Active model**: `fleet_launch` passes `--model <ctx.model.id>` (current main model), not the static `PI_*` env vars
 - **Background-work** registry: built-in fallback (no external dependency); tasks appear in `fleet_status` only
 
+### L3 — Watcher esterno zero-token (`bin/fleet-watch*.sh` + `extensions/fleet-watch-arm.ts`)
+
+Wake **even when Pi is closed**. Zero-token: the model runs only on actionable events.
+
+- **When you need it**: you close Pi (or Pi crashes) while tasks are running; without L3 the wake is lost.
+- **How to enable**: automatic — `extensions/fleet-watch-arm.ts` arms at `session_start` (and drains the queue). Manual: `fleet_watch_arm_pi` / `bash bin/fleet-watch-arm.sh --restart`.
+- **Durable queue**: `~/.pi/fleet/.wake-queue/*.json` survives Pi restarts; drained at next open via `fleet_wake_drain_pi` / `bash bin/fleet-wake-drain.sh --count` and acknowledged with `--ack`.
+- **Singleton lock**: `~/.pi/fleet/.watch.lock` + beacon `~/.pi/fleet/.last-watcher-beat` (`bin/fleet-lock-lib.sh`, `FLEET_STATE_HOME` shared with the extension).
+- **What it does**: `fleet-watch.sh` polls (3s) and absorbs benign (`running` with fresh beat); on `done`/`failed`/`needs_input`/new queue file it writes the queue and exits with the reason — the arm layer re-arms before waking.
+- **Fallback**: if L3 scripts are absent, L2 still works (extension catches and degrades).
+
+See `docs/ARCHITECTURE.md` for the full L3 flow, state layout, and differences from firstmate.
+
 ---
 
 ## Troubleshooting

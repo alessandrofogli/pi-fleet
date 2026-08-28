@@ -12,13 +12,14 @@
  *    task entra in failed/needs_input (i done sono silenziosi, come da decisioni F0)
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { mountFleetWatchArm } from "./fleet-watch-arm.js";
 
 const EXT_DIR = dirname(fileURLToPath(import.meta.url));
 const LAUNCHER = join(EXT_DIR, "..", "bin", "herdr-launch.sh");
@@ -540,12 +541,55 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   });
 
   // ------------------------------------------------------ ciclo di vita -----
+  // L3 watcher esterno: feature flag con fallback in-process (M2)
+  // Se fleet-watch-arm.ts o bin/fleet-watch-arm.sh esistono e siamo captain,
+  // mountFleetWatchArm gestisce generation/lock/arm/wake/drain + tool fleet_watch_arm_pi.
+  // Altrimenti fallback al watcher in-process polling 3s.
+  const EXT_WATCH_ARM_SH = join(EXT_DIR, "..", "bin", "fleet-watch-arm.sh");
+  const EXT_WATCH_ARM_TS = join(EXT_DIR, "fleet-watch-arm.ts");
+  const USE_EXTERNAL_WATCHER = IS_CAPTAIN && (existsSync(EXT_WATCH_ARM_TS) || existsSync(EXT_WATCH_ARM_SH));
+
   let generation = 0;
   let stopWatcher: (() => void) | null = null;
   const watch = new Map<string, TaskState>();
+  let externalMounted = false;
+
+  if (USE_EXTERNAL_WATCHER) {
+    try {
+      const fleetRoot = resolve(EXT_DIR, "..");
+      const res = mountFleetWatchArm(pi, { stateHome: STATE_HOME, extDir: EXT_DIR, root: fleetRoot });
+      if (res.ok) {
+        externalMounted = true;
+      } else {
+        console.warn(`[pi-fleet] external watcher not mounted: ${res.message} — fallback in-process`);
+      }
+    } catch (e) {
+      console.warn(`[pi-fleet] external watcher mount failed: ${e instanceof Error ? e.message : String(e)} — fallback in-process`);
+    }
+    // Drain best-effort di wake pendenti anche se mount fallisce (Pi era chiuso)
+    if (!externalMounted) {
+      const drainScript = join(resolve(EXT_DIR, ".."), "bin", "fleet-wake-drain.sh");
+      if (existsSync(drainScript)) {
+        try {
+          spawnSync("bash", [drainScript], {
+            cwd: resolve(EXT_DIR, ".."),
+            encoding: "utf8",
+            env: { ...process.env, FLEET_STATE_HOME: STATE_HOME, FLEET_ROOT_OVERRIDE: resolve(EXT_DIR, "..") },
+            timeout: 5000,
+          });
+        } catch { /* best-effort */ }
+      }
+    }
+  }
 
   pi.on("session_start", () => {
     if (!IS_CAPTAIN) return;
+    if (externalMounted) {
+      // Esterno già gestito da mountFleetWatchArm (generation + arm + drain interni)
+      // Solo reconcile stale task per non lasciare zombie .json
+      void reconcileStaleTasks();
+      return;
+    }
     generation++;
     stopWatcher?.();
     void (async () => {
@@ -555,6 +599,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", () => {
+    if (externalMounted) return; // gestito dal modulo esterno (stopGeneration)
     generation++;
     stopWatcher?.();
     stopWatcher = null;
