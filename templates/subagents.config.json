@@ -1,0 +1,4 @@
+{
+  "timeoutMs": 21600000,
+  "waitTool": { "enabled": true, "defaultTimeoutMs": 120000 }
+}

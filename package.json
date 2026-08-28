@@ -1,0 +1,28 @@
+{
+  "name": "pi-fleet",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Sub-agent visibili in tab herdr per pi-coding-agent, con wake della chat quando serve il capitano",
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "dependencies": {
+    "pi-subagents": "*"
+  },
+  "bundledDependencies": [
+    "pi-subagents"
+  ],
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "latest",
+    "@types/node": "^26.4.0",
+    "pi-subagents": "latest",
+    "typebox": "latest",
+    "typescript": "^5.5.0"
+  },
+  "bundleDependencies": [
+    "pi-subagents"
+  ]
+}

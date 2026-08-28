@@ -1,0 +1,10 @@
+# dipendenze locali di sviluppo
+node_modules/
+
+# macOS
+.DS_Store
+
+# runtime/dev
+*.log
+*.bad
+.tmp/
