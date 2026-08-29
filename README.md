@@ -6,6 +6,8 @@ A [Firstmate](https://github.com/kunchenguid/firstmate)-like experience inside p
 
 > **Inspired by [Firstmate](https://github.com/kunchenguid/firstmate)** — the original fleet orchestrator for pi. pi-fleet brings the same background-sidebar + isolated-worktree + captain-only wake pattern natively into pi.
 
+**Third-party notices** · [Firstmate](https://github.com/kunchenguid/firstmate) (MIT, © 2026 Kun Chen) — inspiration and behavioral parity (delivery postures, durable inbox, memory stow, delivery gate); original code only. · [no-mistakes](https://github.com/jonathanong/no-mistakes) (MIT, © 2026 Jonathan Ong) — optional deterministic check engine when configured per project. pi-fleet is licensed under [MIT](LICENSE).
+
 ---
 
 ## How it works
