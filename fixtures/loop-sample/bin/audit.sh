@@ -34,7 +34,8 @@ add() {
 
 for f in "$SRC_DIR"/*.sh; do
   [[ -f "$f" ]] || continue
-  rel="${f#"$SRC_DIR"/}"
+  # repo-relative location (review-loop-protocol contract: "src/parser.py:42")
+  rel="src/${f#"$SRC_DIR"/}"
   lineno=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     lineno=$((lineno + 1))
