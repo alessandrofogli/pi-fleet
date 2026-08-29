@@ -6,7 +6,7 @@
 |---|---|---|---|---|---|
 | **L1** | Baseline | pi-subagents install, 6h timeout, FleetView | in-process (pi-subagents) | 0 extra | done |
 | **L2** | Herdr-pane launcher | Background children in a dedicated fleet workspace (visible only in the agents sidebar) + worktree per task + in-process watcher | in-process watcher (3s poll) | 0 extra | done (M1+M2+M3+M4) |
-| **L3** | Watcher esterno | Wake **even when Pi is closed** — zero-token, restart-proof | external bash loop + durable queue | 0 (model runs only on actionable) | this milestone |
+| **L3** | External watcher | Wake **even when Pi is closed** — zero-token, restart-proof | external bash loop + durable queue | 0 (model runs only on actionable) | this milestone |
 
 L2 already covers laptop suspend (freeze → resume). L3 exists only for **Pi really closed** or multi-harness.
 
@@ -24,9 +24,9 @@ L2 already covers laptop suspend (freeze → resume). L3 exists only for **Pi re
    │         │         │    benign (running, beat fresh) ──► absorb, sleep
    │         │         │    actionable ──► print reason, write .wake-queue/*.json, exit
    │         │         │                                    │
-   │         │         │         Pi vivo? ──YES──► child-close handler: rearm + sendMessage(triggerTurn)
+   │         │         │         Pi alive? ──YES──► child-close handler: rearm + sendMessage(triggerTurn)
    │         │         │                                    │
-   │         │         │         Pi chiuso? ─NO──► file stays in .wake-queue/
+   │         │         │         Pi closed? ─NO──► file stays in .wake-queue/
    │         │         │                                    │         │
    │         │         │                                    │    next Pi open
    │         │         │                                    │    session_start → fleet-wake-drain.sh
@@ -96,7 +96,7 @@ Lifecycle bridge. Captain-only (`cwd==HOME` or `PI_FLEET_CAPTAIN=1`).
 
 ## L3.5 Group Wake Barrier
 
-Batch di N task lanciati nello stesso messaggio → stesso `groupId`, unico digest barrierato.
+A batch of N tasks launched in the same message → shared `groupId`, a single barriered digest.
 
 ### Behavior
 
@@ -105,28 +105,28 @@ Batch di N task lanciati nello stesso messaggio → stesso `groupId`, unico dige
 | Group of 3, all `done` | No intermediate wake. When 3/3 → **single** verbose `fleet_notice` with 3 sections | `triggerTurn:false` (followUp) |
 | Group of 3, one `needs_input` | **Immediate wake** (does not wait for the others): `group X: task Y requires input (2 running)` | `triggerTurn:true` |
 | Group of 3, one `failed` | Barrier (waits for all, like `done`) → final digest `2 done + 1 failed` | `triggerTurn:true` if failed included |
-| Gruppo misto durate (1′ / 10′ / 25′) | Barrier penalizza feedback precoce — voluto. `fleet_status` resta consultabile | — |
-| Task singolo (no `groupId`) | Retrocompatibile: `groupId = task.id`, `groupSize = 1` → wake immediato come prima | come L2/L3 |
+| Mixed-duration group (1′ / 10′ / 25′) | The barrier delays early feedback — intentional. `fleet_status` stays consultable | — |
+| Single task (no `groupId`) | Backward compatible: `groupId = task.id`, `groupSize = 1` → immediate wake as before | as L2/L3 |
 
 `groupMode`: `"barrier"` (default) vs `"streaming"` per-group (future); `groupFailPolicy` implemented: `"waitAll"` (default) — failed buffered in the group digest — or `"immediate"` — failed wakes the captain right away with the group context (`group_failed_immediate`).
 
-### Diagramma flusso barrier
+### Barrier flow diagram
 
 ```
- batch (1 messaggio LLM)          launcher                watcher / coordinator         chat
+ batch (1 LLM message)           launcher                watcher / coordinator         chat
  ─────────────────────            ────────                ─────────────────────         ────
- 3× fleet_launch ──► groupId=grp-a1b2c3, groupSize=3 ──► 3 pane herdr laterali + worktree
-                      scrivi {id}.json con groupId/size
+ 3× fleet_launch ──► groupId=grp-a1b2c3, groupSize=3 ──► 3 herdr side panes + worktrees
+                      write {id}.json with groupId/size
                                                             │
- Task A done ──► scrive {id}.done.json, chiude il pane ────────►│ bufferizza {id, summary}
- Task B done ──► idem ──────────────────────────────────────►│ bufferizza (2/3)
- Task C done ──► idem ──────────────────────────────────────►│ 3/3 → compone digest verboso
-                                                            │   "⚑ gruppo grp-a1b2c3 completo (3/3)"
-                                                            │   + sezione per task (titolo, stato, summary, changedFiles)
+ Task A done ──► writes {id}.done.json, closes the pane ────►│ buffers {id, summary}
+ Task B done ──► idem ──────────────────────────────────────►│ buffers (2/3)
+ Task C done ──► idem ──────────────────────────────────────►│ 3/3 → builds the verbose digest
+                                                            │   "⚑ group grp-a1b2c3 complete (3/3)"
+                                                            │   + per-task section (title, state, summary, changedFiles)
                                                             ├──────────────────────────────► sendMessage(fleet_notice, followUp)
                                                             │
- Task B needs_input ──► scrive .needs-input.json ───────────►│ flush IMMEDIATO
-                                                            │   "⚑ gruppo grp-a1b2c3: task B richiede input (A done, C running)"
+ Task B needs_input ──► writes .needs-input.json ───────────►│ IMMEDIATE flush
+                                                            │   "⚑ group grp-a1b2c3: task B needs input (A done, C running)"
                                                             ├──────────────────────────────► sendMessage(triggerTurn:true)
 ```
 
@@ -134,53 +134,53 @@ Batch di N task lanciati nello stesso messaggio → stesso `groupId`, unico dige
 - Only `needs_input` keeps the pane alive, as in L2.
 - The main LLM at wake time produces a condensed synthesis (“in short: …”) — LLM's job, not the extension's.
 
-### Formato stato
+### State format
 
 ```jsonc
-// ~/.pi/fleet/{taskid}.json — campi L3.5 aggiunti (opzionali, retrocompatibili)
+// ~/.pi/fleet/{taskid}.json — L3.5 fields added (optional, backward compatible)
 {
-  "id": "rifattorizza-auth-042",
-  "groupId": "grp-20260828-a1b2c3",   // batch del turno LLM, o task.id se singolo
-  "groupSize": 3,                      // atteso nel gruppo
-  "groupLabel": "analisi MiroFish",   // opzionale, da titolo batch
-  "groupMode": "barrier",             // "barrier" | "streaming" (futuro, default barrier)
-  // ... resto invariato (title, project, state, paneId, summary, changedFiles, ...)
+  "id": "refactor-auth-042",
+  "groupId": "grp-20260828-a1b2c3",   // LLM-turn batch, or task.id when single
+  "groupSize": 3,                      // expected in the group
+  "groupLabel": "docs review",         // optional, from the batch title
+  "groupMode": "barrier",             // "barrier" | "streaming" (future, default barrier)
+  // ... rest unchanged (title, project, state, paneId, summary, changedFiles, ...)
 }
-// Persistenza gruppo per recovery restart Pi:
+// Group persistence for Pi-restart recovery:
 // ~/.pi/fleet/.wake-groups/{groupId}.json
 // { groupId, expected, label, mode, pending:[ids], results:{id:{state, summary}} }
 ```
 
-- `groupId` auto-generato dall'estensione se non passato: tutti i `fleet_launch` dello stesso turno LLM (o entro finestra 2–3s) condividono `grp-<date>-<rand6>`. Se `fleet_launch` passa `groupId` esplicito, vince quello (gruppi cross-turn).
-- `groupSize` = quanti task l'estensione ha lanciato nel batch (coordinatore in memoria, persistito per recovery).
-- Persistito anche `~/.pi/fleet/.wake-groups/{groupId}.json` per recovery dopo restart Pi: il coordinatore ricostruisce `pending` dai task su disco.
+- `groupId` auto-generated by the extension when not passed: all `fleet_launch` calls of the same LLM turn (or within a 2–3s window) share `grp-<date>-<rand6>`. An explicit `groupId` passed to `fleet_launch` wins (cross-turn groups).
+- `groupSize` = how many tasks the extension launched in the batch (in-memory coordinator, persisted for recovery).
+- Also persisted `~/.pi/fleet/.wake-groups/{groupId}.json` for recovery after a Pi restart: the coordinator rebuilds `pending` from the tasks on disk.
 
-### Come `fleet_status` mostra gruppi
+### How `fleet_status` shows groups
 
 - **Single row**: if `task.groupSize > 1` → `- **Title** [done] (grp:grp-abc 2/3) — 5s ago — summary — /project` with `(grp:<shortId 8> done/total)` where `total = groupSize`, `done = count of terminal states in the group`.
-- **Raggruppamento**: se task hanno gruppi, output raggruppato per `groupId`:
+- **Grouping**: group the output by `groupId` when tasks have groups:
   ```
-  Gruppo a1b2c3d4 (analisi MiroFish) — 2/3 completi:
+  Group a1b2c3d4 (docs review) — 2/3 complete:
     - Task A [done] (grp:a1b2c3d4 2/3)
     - Task B [running] (grp:a1b2c3d4 2/3)
     - Task C [done] (grp:a1b2c3d4 2/3)
-  Singoli:
+  Singles:
     - Task D [done]
   ```
-  Usa `Map<groupId, Task[]>` e `GroupRecord` se disponibile, altrimenti raggruppa per `groupId` field.
-- **Filtro**: `fleet_status --group <id>` (o `fleet_status({groupId:"grp-..."})`) filtra `tasks.filter(t => (t.groupId ?? t.id) === groupId)`.
+  Uses `Map<groupId, Task[]>` and `GroupRecord` when available, otherwise groups by the `groupId` field.
+- **Filter**: `fleet_status --group <id>` (or `fleet_status({groupId:"grp-..."})`) filters `tasks.filter(t => (t.groupId ?? t.id) === groupId)`.
 - **Details**: `details: { tasks: clean, groups: groupSummaries }` where `groupSummaries = [{groupId, label, expected, done, pendingIds}]` (from `loadGroups()`/`rebuildGroupsFromDisk()` or direct count if the module is absent).
 - Compatibility: does not break `tcs`, does not break single tasks (`groupSize=1` does not show `grp:`).
 
-### Componenti toccati
+### Components touched
 
-| File | Ruolo L3.5 |
+| File | L3.5 role |
 |---|---|
-| `extensions/index.ts` | Genera `groupId` per batch, scrive `groupId/size` nel task json; `fleet_status` raggruppato + filtro + `grp:` |
-| `extensions/fleet-group.ts` | `loadGroups`/`rebuildGroupsFromDisk`/`formatGroupDigest`/`recordTaskDone` + persistenza `.wake-groups/` |
+| `extensions/index.ts` | Generates a `groupId` per batch, writes `groupId/size` into the task json; grouped `fleet_status` + filter + `grp:` |
+| `extensions/fleet-group.ts` | `loadGroups`/`rebuildGroupsFromDisk`/`formatGroupDigest`/`recordTaskDone` + `.wake-groups/` persistence |
 | `extensions/fleet-watch-arm.ts` | Barrier coordinator: `Map<groupId, {expected, pending, results}>`, buffers wakes, emits a digest when `pending==0` (exception `needs_input` → immediate flush) |
-| `bin/fleet-watch.sh` | Classifica come prima; se task ha `groupId barrier` non scrive subito `.wake-queue` ma lascia decidere all'estensione (oppure scrive e l'estensione filtra prima di `sendMessage`) |
-| `bin/fleet-wake-drain.sh` | Drain ragionato per gruppo (opzionale `holdUntilGroupComplete`) |
+| `bin/fleet-watch.sh` | Classifies as before; for a task with `groupId` + `barrier` it does not write `.wake-queue` right away — it lets the extension decide (or writes it and the extension filters before `sendMessage`) |
+| `bin/fleet-wake-drain.sh` | Group-aware drain (optional `holdUntilGroupComplete`) |
 
 ---
 
@@ -188,7 +188,7 @@ Batch di N task lanciati nello stesso messaggio → stesso `groupId`, unico dige
 
 ```
 ~/.pi/fleet/
-├── tasks/                          # brief per task (mkdir -p at launch)
+├── tasks/                          # task briefs (mkdir -p at launch)
 │   └── <id>.brief.md
 ├── .wake-queue/                    # L3 durable queue (mkdir -p at arm/watcher)
 │   ├── .keep                       # gitkeep / placeholder
@@ -206,8 +206,8 @@ Batch di N task lanciati nello stesso messaggio → stesso `groupId`, unico dige
 ├── <id>.abort                      # abort signal (timestamp)
 ├── <id>.log                        # launcher log
 ├── <id>.bad                        # parse-failed state file (quarantined)
-├── <id>.inbox/                     # durable steer: messaggi <seq>.json + ack markers + handled/
-└── branch-outcomes.jsonl           # audit trail append-only: transizioni terminali + needs_input
+├── <id>.inbox/                     # durable steer: messages <seq>.json + ack markers + handled/
+└── branch-outcomes.jsonl           # audit trail append-only: terminal transitions + needs_input
 ```
 
 ### `<id>.json` (TaskStateFile)
@@ -216,8 +216,8 @@ Batch di N task lanciati nello stesso messaggio → stesso `groupId`, unico dige
 {
   "id": "task-123",
   "title": "Refactor auth",
-  "project": "/Users/you/projects/my-app",
-  "cwd": "/Users/you/.treehouse/pi-fleet-xxx/1/my-app",
+  "project": "~/projects/my-app",
+  "cwd": "~/.treehouse/pi-fleet-xxx/1/my-app",
   "briefFile": "~/.pi/fleet/tasks/task-123.brief.md",
   "state": "spawning | running | done | failed | aborted | needs_input",
   "startedAt": 1724800000000,
@@ -270,18 +270,18 @@ See `README.md` Architecture section for M1 (launcher) + M2 (extension watcher/r
 
 ---
 
-## Features estese
+## Additional features
 
-Aggiunte successive a M1/M2/L3.5, senza cambiare i default (`ship`, `barrier`, `waitAll`, `no-mistakes`). Tutti i moduli nuovi sono lazy-imported e fail-soft (stesso pattern di `fleet-group.ts`).
+Added on top of M1/M2/L3.5 without changing the defaults (`ship`, `barrier`, `waitAll`, `no-mistakes`). All new modules are lazy-imported and fail-soft (same pattern as `fleet-group.ts`).
 
 | Feature | Where | Behavior |
 |---|---|---|
 | **Scout tasks** (`kind: "scout"`) | `fleet_launch`, `bin/herdr-launch.sh`, `extensions/fleet-group.ts` | The child produces only `report.md` (no commit/PR); done-marker with `reportPath`, merged from the state (`{id}.json`) |
 | **Durable inbox** | `fleet_steer`, `extensions/fleet-inbox.ts`, `bin/fleet-watch.sh` | Message persisted in `<id>.inbox/<seq>.json`, delivered via `runHerdr`, re-rings until acked (`reRingInFlight` guard, then escalation to `fleet_notice` after maxReplays); `replay:false` = legacy fire-and-forget |
 | **Delivery posture** | `fleet_launch`, `extensions/fleet-posture.ts`, CHILD_PROMPT | `--delivery-posture` (no-mistakes/direct-PR/local-only/yolo); rules injected into the child prompt, default from `postures.json` |
-| **Branch outcomes** | `extensions/fleet-outcomes.ts`, `fleet_status`, `reconcileStaleTasks`, `fleet_abort` | Audit trail append-only `branch-outcomes.jsonl` (transizioni terminali + `needs_input`), best-effort |
+| **Branch outcomes** | `extensions/fleet-outcomes.ts`, `fleet_status`, `reconcileStaleTasks`, `fleet_abort` | Audit trail append-only `branch-outcomes.jsonl` (terminal transitions + `needs_input`), best-effort |
 | **groupFailPolicy** | `fleet_launch`, `extensions/fleet-group.ts`, watcher | `waitAll` (default) vs `immediate` → `group_failed_immediate` event wakes the captain immediately with group context |
-| **Bootstrap** | hook `session_start`, `extensions/fleet-bootstrap.ts`, tool `fleet_bootstrap` | Check tool, cleanup safe stati stale, digest flotta; mai bloccante (`triggerTurn:false`) |
-| **Captain learnings/prefs** | hook `session_start`, `extensions/fleet-learn.ts`, tool `fleet_learn`/`fleet_captain_pref` | `captain.md`/`captain-shared.md`/`learnings.md` in `~/.pi/fleet/` (mai in git), dedup 24h, scritti atomicamente |
+| **Bootstrap** | hook `session_start`, `extensions/fleet-bootstrap.ts`, tool `fleet_bootstrap` | Tool check, safe stale-state cleanup, fleet digest; never blocking (`triggerTurn:false`) |
+| **Captain learnings/prefs** | hook `session_start`, `extensions/fleet-learn.ts`, tool `fleet_learn`/`fleet_captain_pref` | `captain.md`/`captain-shared.md`/`learnings.md` in `~/.pi/fleet/` (never in git), 24h dedup, written atomically |
 
-Struttura `extensions/index.ts` ai confini: `sendWake` (third param `overrides?: {detail?}` per il fail immediate) + helper separato `sendAttention`; `startWatcher` → prima `appendOutcome` best-effort, poi logica group/wake, poi gestione eventi (`group_failed_immediate`, reRing inbox).
+`extensions/index.ts` structure at the seams: `sendWake` (third param `overrides?: {detail?}` for the immediate-fail path) + separate `sendAttention` helper; `startWatcher` → best-effort `appendOutcome` first, then group/wake logic, then event handling (`group_failed_immediate`, inbox reRing).

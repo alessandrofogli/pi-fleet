@@ -49,7 +49,7 @@ GATE_YAML="$PROJECT_ROOT/gate.yaml"
 posture="no-mistakes"
 autoPr="false"
 maxRounds=5
-declare -a CHECKS=()   # una riga per check: "name|cmd|kind"
+declare -a CHECKS=()   # one row per check: "name|cmd|kind"
 
 if [[ -f "$GATE_YAML" ]]; then
   cfg_posture="$(sed -n 's/^[[:space:]]*posture:[[:space:]]*\(.*\)/\1/p' "$GATE_YAML" | head -1 | tr -d '[:space:]')"

@@ -36,6 +36,7 @@ if [[ -n "$missing" ]]; then
   err "missing prerequisites:$missing — install them before continuing (see README.md)."
   exit 1
 fi
+echo "   ℹ  versions: see README Requirements — pi ≥ 0.84, herdr ≥ 0.8, treehouse ≥ 2.3."
 
 # T-011: gh-axi for the gate's automatic PR — OPTIONAL, auto-install if absent
 if command -v gh-axi >/dev/null 2>&1; then
@@ -54,7 +55,7 @@ fi
 echo "   ℹ  delivery gate (T-011): OPTIONAL — active only for projects with gate.yaml and"
 echo "      no-mistakes posture; the no-mistakes engine in the checks (impacted-checks/resolve-check) is optional."
 
-# herdr attivo?
+# herdr reachable?
 if ! herdr workspace list >/dev/null 2>&1; then
   warn "herdr not reachable (socket?). Start it first; setup continues anyway."
 fi
@@ -81,8 +82,8 @@ configure_treehouse_projects() {
   if [[ -z "$root" ]]; then
     warn "FLEET_PROJECTS_DIR not set — skipping treehouse auto-config."
     echo "       Set: export FLEET_PROJECTS_DIR=~/projects  (in your ~/.zshrc or ~/.bashrc)"
-    echo "       Then restart this script or run manually:"
-    echo "         cd <repo> && treehouse config --root ~/.treehouse && treehouse add --target ."
+    echo "       Then restart this script or configure treehouse manually per repo:"
+    echo "         cd <repo> && treehouse init    # verify: treehouse status"
     return 0
   fi
   # expand ~ if present
@@ -91,18 +92,49 @@ configure_treehouse_projects() {
     warn "FLEET_PROJECTS_DIR does not exist: $root — skipping."
     return 0
   fi
+  # Modern treehouse (>= 2.3) registers repos with `init` (creates treehouse.toml) and
+  # warms the pool with `get --lease`/`return`; very old releases used `config` + `add`.
+  # Feature-detect so both work.
+  local modern=0
+  if treehouse init --help >/dev/null 2>&1; then modern=1; fi
   local count=0
   for dir in "$root"/*/; do
     [[ -d "$dir/.git" ]] || continue
     echo "   configuring treehouse for: $(basename "$dir")"
-    ( cd "$dir" && treehouse config --root ~/.treehouse && treehouse add --target . ) \
-      && ((count++)) || warn "   failed for $(basename "$dir")"
+    if [[ "$modern" == "1" ]]; then
+      if ( cd "$dir" && warm_treehouse_pool ); then
+        ((count++))
+      else
+        warn "   failed for $(basename "$dir") — check that treehouse >= 2.3 (see README Requirements)"
+      fi
+    else
+      ( cd "$dir" && treehouse config --root ~/.treehouse && treehouse add --target . ) \
+        && ((count++)) || warn "   failed for $(basename "$dir")"
+    fi
   done
   if [[ $count -eq 0 ]]; then
     warn "no git repo found in $root"
   else
     echo "   ✓ $count repos configured"
   fi
+}
+
+# Register one repo with modern treehouse (>= 2.3) and warm its pool idempotently.
+# `treehouse init` on an already-initialized repo prints "treehouse.toml already exists"
+# and exits 1 — that is NOT a failure. The pool is warmed only when empty, so re-runs
+# never grow the pool.
+warm_treehouse_pool() {
+  local out rc wt
+  out="$(treehouse init 2>&1)"; rc=$?
+  if [[ $rc -ne 0 ]] && [[ "$out" != *"already exists"* ]]; then
+    return 1
+  fi
+  if treehouse status 2>&1 | grep -qiE "no worktrees in pool"; then
+    wt="$(treehouse get --lease --no-fetch --lease-holder pi-fleet-setup 2>/dev/null)" || return 1
+    [[ -n "$wt" ]] || return 1
+    treehouse return "$wt" >/dev/null 2>&1 || true
+  fi
+  return 0
 }
 configure_treehouse_projects
 
@@ -122,13 +154,22 @@ echo
 echo "──────────────────────────────────────────────────────────────────"
 say "DONE. Final manual steps:"
 echo
-echo "  1. Start herdr (if you haven't): herdr"
-echo "  2. (Already done if FLEET_PROJECTS_DIR was set) Otherwise configure treehouse manually:"
-echo "       cd <repo-path> && treehouse config --root ~/.treehouse && treehouse add --target ."
-echo "  3. Check the default model in ~/.pi/agent/settings.json"
+echo "  1. Start herdr (if you haven't): herdr   (default session)"
+echo "     Requirements: pi >= 0.84 · herdr >= 0.8 · treehouse >= 2.3 · jq · python3 (see README)."
+echo "  2. (Already done if FLEET_PROJECTS_DIR was set) Otherwise configure treehouse per repo:"
+echo "       cd <repo-path> && treehouse init    # verify: treehouse status"
+echo "  3. Recommended: export FLEET_PROJECTS_DIR=~/projects (in ~/.zshrc or ~/.bashrc) so"
+echo "     fleet_launch can reference projects by short name; otherwise use absolute paths."
+echo "  4. Check the default model in ~/.pi/agent/settings.json"
 echo "     if needed (children INHERIT the active model at launch)."
-echo "  4. RESTART pi (extension loads at startup)."
-echo "  5. Try:  look at my-project and give me a README summary"
+echo "  5. Reload pi with /reload (or restart pi) — extensions and skills load at startup."
+echo "  6. Smoke test:  look at my-project and give me a README summary"
+echo "     (replace my-project with any repo of yours; the report lands in the chat)."
+echo
+echo "  Already installed by this script / package:"
+echo "    - 13 fleet_* extension tools + the fleet-brief skill (pi install . / package skills/)"
+echo "    - ~/.pi/AGENTS.md delegation policy (existing file backed up to AGENTS.md.bak)"
+echo "    - subagent config (6h timeout + wait tool): ~/.pi/agent/extensions/subagent/config.json"
 echo
 echo "  Delivery gate (T-011, optional):"
 echo "    - To activate it in a project: create gate.yaml at the root (see README.md §Gate)."

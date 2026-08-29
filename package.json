@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Sub-agent visibili in tab herdr per pi-coding-agent, con wake della chat quando serve il capitano",
+  "description": "Visible herdr-tab sub-agents for pi-coding-agent, with chat wake when the captain is needed",
   "license": "MIT",
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

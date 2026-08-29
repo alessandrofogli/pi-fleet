@@ -199,8 +199,9 @@ function resolveProject(raw: string): { ok: true; path: string } | { ok: false; 
   if (rootEnv) {
     roots.push(rootEnv.startsWith("~") ? join(homedir(), rootEnv.slice(1)) : rootEnv);
   } else {
-    // Back-compat fallback for existing setups that used ~/Documents/GitHub.
-    // New setups should set FLEET_PROJECTS_DIR explicitly (see README).
+    // Back-compat fallback from before FLEET_PROJECTS_DIR existed: short names
+    // resolved under ~/Documents/GitHub. New setups should set
+    // FLEET_PROJECTS_DIR explicitly (see README).
     const legacy = join(homedir(), "Documents", "GitHub");
     if (existsSync(legacy)) roots.push(legacy);
   }
@@ -452,7 +453,7 @@ async function reconcileStaleTasks(): Promise<void> {
       t.state = state;
       t.doneAt = Date.now();
       writeTask(t);
-      // T-004: audit trail branch-outcomes (best-effort, non blocca il reconcile)
+      // T-004: audit trail branch-outcomes (best-effort, never blocks reconcile)
       try { getFleetOutcomesSync()?.appendOutcome(STATE_HOME, t); } catch { /* best-effort */ }
     }
   }
@@ -572,7 +573,7 @@ function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => vo
                   const res = await runHerdr(["agent", "prompt", paneId, message], 15_000);
                   return res.ok;
                 };
-                // il deliver del modulo registra replays++/lastReplayAt su disco
+                // the module's delivery records replays++/lastReplayAt on disk
                 return mod.deliver(STATE_HOME, task.id, msg.seq, send);
               },
               onEscalation: (tid, msg) => {
@@ -711,7 +712,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         doneAt: null,
         timeoutMs: (params.timeoutMin ?? 360) * 60000,
         groupId: effectiveGroupId,
-        groupSize: 1, // placeholder — il coordinatore conta reale su disco, o si aggiorna via batch
+        groupSize: 1, // placeholder — the coordinator counts for real on disk, or is updated via batch
         groupLabel: params.groupLabel,
         groupMode: effectiveGroupMode,
         kind: params.kind ?? "ship",
@@ -818,7 +819,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
           groupCounts = new Map(groupSummaries.map((g) => [g.groupId, { done: g.done, total: g.expected }]));
         }
       } catch { /* ignore */ }
-      // T-002 (5b.2): conteggio inbox pendenti per task (calcolo leggero, fail soft)
+      // T-002 (5b.2): count pending inbox messages per task (lightweight calc, fail soft)
       const clean = tasks.map((t) => {
         const base = { ...t, briefFile: undefined as string | undefined };
         let inboxPending: number | undefined;
@@ -974,7 +975,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
           try {
             const enq = inbox.enqueue(STATE_HOME, task.id, params.message, { replay });
             if (enq.ok) seq = enq.seq;
-          } catch { /* fail soft: fallback diretto sotto */ }
+          } catch { /* fail soft: direct fallback below */ }
         }
         // 2. Immediate delivery if there is a live pane and non-terminal state (as today)
         const paneId = task.paneId;
@@ -1476,7 +1477,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     void (async () => {
       try {
         const fl = await getFleetLearn();
-        if (!fl || typeof fl.stowPass !== "function") return; // retrocompat: versione senza T-012
+        if (!fl || typeof fl.stowPass !== "function") return; // back-compat: version without T-012
         const lastPassPath = join(STATE_HOME, ".stow-last-pass");
         const today = new Date().toISOString().slice(0, 10);
         let alreadyToday = false;
@@ -1494,7 +1495,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         console.log(
           `[pi-fleet stow] refreshed=${report.refreshed} archived=${report.archived} removed=${report.removed} overflow=${report.overflow} budget=${report.budget.usedTokens}/${report.budget.limitTokens}`,
         );
-      } catch { /* best-effort: il pruning non deve mai bloccare l'avvio */ }
+      } catch { /* best-effort: pruning must never block startup */ }
     })();
   });
 }

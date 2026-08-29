@@ -275,7 +275,7 @@ if [[ "$WATCH_EXIT" -gt 128 ]]; then
   WATCH_SIGNAL=$(kill -l "$sig_num" 2>/dev/null || printf '%s' "$sig_num")
 fi
 
-# 5. Classifica output
+# 5. Classify output
 REASON=""
 if REASON=$(classify_output "$WATCH_OUT"); then
   # Has a classifiable reason

@@ -39,6 +39,9 @@ Only if the request falls into one of these cases:
 - Success = report in chat without LLM interruption; failed/needs_input = wake with triggerTurn. No wake for voluntary abort.
 - Only `pi` tabs (no claude/codex).
 
+### Where to look for projects
+- Projects live wherever the user works: set `FLEET_PROJECTS_DIR` (e.g. `export FLEET_PROJECTS_DIR=~/projects`) to reference projects by short name; otherwise pass absolute paths to `fleet_launch`.
+
 ## Skill creation — placement (pi-fleet workflow)
 - Skills that serve OUR workflow in pi (agent + pi-fleet: brief, dispatch, task execution, etc.) must ALWAYS be created INSIDE the pi-fleet repo (`skills/<name>/SKILL.md`): shipped with the extension, auto-loaded by pi, versioned. Never create them globally.
 - Global (`~/.agents/skills/`) ONLY for generic skills NOT tied to our pi-fleet workflow (e.g. i-have-adhd, grilling, caveman...).

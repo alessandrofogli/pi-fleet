@@ -115,7 +115,7 @@ herdr_cli() {
   herdr --session "$SESSION" "$@" 2>&1
 }
 
-# Legge un brief da file se comincia con @
+# Reads a brief from a file if it starts with @
 if [[ "$BRIEF" == @* ]]; then
   BRIEF_FILE="${BRIEF#@}"
   [[ -f "$BRIEF_FILE" ]] || { herr "brief file not found: $BRIEF_FILE"; exit 2; }
@@ -156,7 +156,7 @@ resolve_fleet_workspace() {
     || ws=""
   [[ -n "$ws" ]] && { echo "$ws"; return 0; }
   for ((try = 1; try <= 3; try++)); do
-    # `workspace create` risponde con .result.workspace.workspace_id
+    # `workspace create` responds with .result.workspace.workspace_id
     # (shape documentata: .result.workspace / .result.tab / .result.root_pane).
     ws="$(herdr_cli workspace create --label "fleet" --cwd "$PROJECT" --no-focus \
       | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)" || ws=""
@@ -311,7 +311,7 @@ log "pi started in the pane (readiness ok)"
 # Waits for pi to actually be ready (idle at prompt) BEFORE the prompt:
 # a prompt sent too early goes into the buffer and is lost (race "typing too early").
 herdr_cli agent wait "$PANE_ID" --until idle >/dev/null 2>&1 \
-  || log "wait idle non confermato (procedo comunque)"
+  || log "wait idle not confirmed (proceeding anyway)"
 sleep 2
 
 # ------------------------------------------------------- 6. brief to the child ----
@@ -429,13 +429,13 @@ while :; do
     exit 0
   fi
   if [[ $(date +%s) -gt $DEADLINE ]]; then
-    herr "timeout dopo ${TIMEOUT_MIN}min: uccido il task"
+    herr "timeout after ${TIMEOUT_MIN}min: killing the task"
     set_state failed
     close_tab
     release_worktree
     exit 1
   fi
-  # liveness: controlla ogni 15s che il pane abbia ancora l'agent attivo
+  # liveness: every 15s check that the pane still has an active agent
   if (( $(date +%s) - LAST_LIVE >= 15 )); then
     LAST_LIVE=$(date +%s)
     agent_alive
@@ -469,14 +469,14 @@ gh_axi() {
   if command -v gh-axi >/dev/null 2>&1; then
     gh-axi "$@"
   else
-    log "gh-axi non in PATH → fallback npx -y gh-axi (documentato)"
+    log "gh-axi not in PATH → fallback npx -y gh-axi (documented)"
     npx -y gh-axi "$@"
   fi
 }
 run_pr_create() {
   local head="$1" body="$2" title="$3" out rc pr
   local try
-  for ((try = 1; try <= 3; try++)); do   # retry leggeri (2×3s) su busy
+  for ((try = 1; try <= 3; try++)); do   # light retries (2×3s) on busy
     out="$(cd "$PROJECT" && gh_axi pr create --head "$head" --base main --title "$title" --body-file "$body" 2>&1)"
     rc=$?
     if [[ $rc -eq 0 ]]; then
@@ -494,7 +494,7 @@ run_pr_create() {
 
 if [[ "$GATE_ACTIVE" == "1" ]]; then
   GATE_REPORT_PATH="gate/report.json"
-  log "gate: rieseguo il gate da me (anti-frode) su $TASK_CWD ..."
+  log "gate: re-running the gate myself (anti-fraud) on $TASK_CWD ..."
   ( cd "$TASK_CWD" && bash "$GATE_RUN" --report "$GATE_REPORT_PATH" >/dev/null 2>&1 )
   GATE_RC=$?
   GATE_OVERALL="red"

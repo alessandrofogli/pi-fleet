@@ -137,7 +137,7 @@ _fleet_enqueue_wake() {
   local seq now out tmp
   mkdir -p "$STATE/.wake-queue" 2>/dev/null || true
   seq=$(_fleet_next_seq)
-  # fallback se seq non numerico (date +%s%N)
+  # fallback if seq is not numeric (date +%s%N)
   case "$seq" in ''|*[!0-9]*) seq=$(date +%s 2>/dev/null || echo 0) ;; esac
   now=$(date +%s 2>/dev/null || echo 0)
   case "$now" in ''|*[!0-9]*) now=0 ;; esac

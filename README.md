@@ -53,17 +53,65 @@ Tested on **macOS** (launcher assumes no `setsid`, POSIX `sed`, `treehouse` — 
 ### Prepare the treehouse pool (once per repo)
 
 ```bash
-cd <repo-path> && treehouse config --root ~/.treehouse && treehouse add --target .
-# verify: treehouse status → shows available worktrees
-# Example: export FLEET_PROJECTS_DIR=~/projects to enable short-name lookup
-#          then project: "my-app" resolves to ~/projects/my-app
+cd <repo-path> && treehouse init   # registers the repo (creates treehouse.toml at the repo root)
+treehouse status                    # verify: the pool shows up (worktrees are created on first task launch, under ~/.treehouse/)
 ```
+
+The setup script does this automatically for every repo under `FLEET_PROJECTS_DIR` (see *Installation*).
+Example: `export FLEET_PROJECTS_DIR=~/projects` enables short-name lookup — then `project: "my-app"` resolves to `~/projects/my-app`.
 
 ---
 
-## Installation
+## Installation / Quickstart (new users)
 
-### 1. Clone
+One out-of-the-box path: **prerequisites → install the package → run the setup script → optional `FLEET_PROJECTS_DIR` → `/reload` → smoke task**. No personal paths, no manual file edits.
+
+**Prerequisites** (see the Requirements table above): `pi` ≥ 0.84, `herdr` ≥ 0.8 with the `default` session running, `treehouse` ≥ 2.3, `jq`, `bash` + `python3`.
+
+### 1. Install the package
+
+```bash
+pi install git:github.com/alessandrofogli/pi-fleet   # no clone needed, run from anywhere
+# once a release tag exists you can pin it: pi install git:github.com/alessandrofogli/pi-fleet@<tag>
+```
+
+The package ships the **13 `fleet_*` extension tools** and the **`fleet-brief` skill** (the package `skills/` directory is loaded automatically). `AGENTS.md` and the subagent config are written by the setup script below.
+
+### 2. Run the setup script
+
+```bash
+~/.pi/agent/git/github.com/alessandrofogli/pi-fleet/bin/setup-fleet.sh
+```
+
+(or, if you cloned the repo instead: `cd pi-fleet && ./bin/setup-fleet.sh`).
+
+The script checks prerequisites (**pi/herdr/treehouse/jq/python3**), re-runs `pi install .`, writes `~/.pi/AGENTS.md` (backing up an existing one to `.bak`), writes the **subagent config** (6h timeout + wait tool) to `~/.pi/agent/extensions/subagent/config.json`, configures the treehouse pool for every repo under `FLEET_PROJECTS_DIR`, and prints the final steps. Re-running it is safe (backups and no-op on already-present config).
+
+### 3. (Optional) Short project names
+
+```bash
+export FLEET_PROJECTS_DIR=~/projects   # add to ~/.zshrc or ~/.bashrc
+```
+
+Without it, pass absolute paths to `fleet_launch` (`/home/user/projects/my-app`, `~/projects/my-app`).
+
+### 4. Reload pi
+
+Run `/reload` in pi (or restart pi) — extensions and skills load only at startup.
+
+### 5. Verify with a smoke task
+
+```
+look at my-project and give me a README summary
+```
+
+The task starts in the dedicated **fleet workspace** (sidebar agents only, never focused into your view); when it finishes the report lands in the chat.
+
+> **What gets installed automatically**: `pi install` → extension tools + `fleet-brief` skill (package). `bin/setup-fleet.sh` → `~/.pi/AGENTS.md` delegation policy + subagent config (6h timeout, wait tool) + optional treehouse pool config from `FLEET_PROJECTS_DIR`.
+
+---
+
+### Alternative — clone and manual install
 
 ```bash
 git clone https://github.com/alessandrofogli/pi-fleet.git
@@ -75,43 +123,23 @@ Or via SSH if the repo is private:
 git clone git@github.com:alessandrofogli/pi-fleet.git
 ```
 
-### 2. Quick install (recommended)
-
-```bash
-./bin/setup-fleet.sh
-```
-
-The script checks prerequisites, runs `pi install .`, writes `~/.pi/AGENTS.md` (backing up an existing one to `.bak`), configures treehouse for all repos in `FLEET_PROJECTS_DIR`, sets the 6h subagent timeout, and prints next steps.
-
-### 3. Manual install
+Then:
 
 ```bash
 pi install .                 # from inside the package directory
+./bin/setup-fleet.sh         # same steps as the quickstart
 ```
 
 `pi install .` registers the local package in `~/.pi/agent/settings.json` automatically — no manual path editing needed. If you clone elsewhere, just run `pi install .` again from the new location.
 
-### 4. Global instructions (automatic delegation)
-
-Copy the delegation policy template:
+To write the delegation policy manually (if you skip the setup script):
 
 ```bash
 cp templates/AGENTS.global.md ~/.pi/AGENTS.md
 ```
 
 (If you already have `~/.pi/AGENTS.md`, merge it or keep the backup: the setup script saves `AGENTS.md.bak` automatically.)
-
-Subagent config (6h timeout + wait tool): see `templates/subagents.config.json` → `~/.pi/agent/extensions/subagent/config.json`.
-
-### 5. Restart pi
-
-The extension loads only at startup. Then try:
-
-```
-look at my-project and give me a README summary
-```
-
-The task starts in the dedicated **fleet workspace** (sidebar agents only, never focused into your view); when it finishes the report lands in the chat.
+Subagent config (6h timeout + wait tool): `templates/subagents.config.json` → `~/.pi/agent/extensions/subagent/config.json`.
 
 ---
 
