@@ -160,6 +160,7 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 | `fleet_steer <id> <msg>` | Write into the child's prompt (e.g. answer a `needs_input`) |
 | `fleet_abort <id>` | Close pane/tab, release worktree, mark `aborted` |
 | `fleet_attach <id>` | Focus the herdr pane of the task |
+| `fleet_bootstrap` | Verify tools, clean stale state, print a fleet digest (optional `verbose`) |
 
 ### Task states
 
@@ -175,6 +176,18 @@ Vedrai un unico digest verboso quando tutti hanno finito. `needs_input` sveglia 
 
 Dettaglio: `groupId`/`groupSize`/`groupLabel`/`groupMode` in `{id}.json`; stato gruppo persistito in `~/.pi/fleet/.wake-groups/{groupId}.json` per recovery dopo restart Pi. `fleet_status` raggruppa per `groupId` e mostra `Gruppo <id> (label) — 2/3 completi:` + `Singoli:`.
 
+### Bootstrap (T-006)
+
+At captain session start (and on demand via the `fleet_bootstrap` tool) pi-fleet runs a best-effort, **zero-config** health pass — it never blocks startup and never installs anything:
+
+- **Tool check**: `jq`, `herdr`, `treehouse`, `git`, `gh` (+ `gh auth status` reported per tool in `details`); only missing tools are flagged.
+- **Stale-state cleanup** (safe, non-destructive): orphan `<id>.done.json` markers (no matching `<id>.json`) are moved to `<id>.done.json.orphan`; `<id>.json.bad` files older than 7 days are deleted; active tasks whose herdr pane is gone are **not** touched here (that's `reconcileStaleTasks`'s job) — they are only reported.
+- **Fleet digest**: counts per state, active groups (group logic reused when available, simple count otherwise), most relevant `needs_input` tasks.
+
+The digest is logged to console at every startup; only when there are clear problems (missing tools or pending `needs_input`) a short informational message is shown with `triggerTurn:false` — the session start is never interrupted.
+
+Implementation: `extensions/fleet-bootstrap.ts` (lazy-loaded, fail-soft — same pattern as `fleet-group.ts`).
+
 ---
 
 ## Architecture
@@ -189,7 +202,8 @@ Dettaglio: `groupId`/`groupSize`/`groupLabel`/`groupMode` in `{id}.json`; stato 
 
 ### M2 — `extensions/index.ts` (pi extension)
 
-- 6 `fleet_*` tools; `fleet_launch` spawns the launcher **detached** (double-fork python, survives chat abort)
+- 7 `fleet_*` tools; `fleet_launch` spawns the launcher **detached** (double-fork python, survives chat abort)
+- **Bootstrap** (T-006): at `session_start` (captain only) checks tools, cleans stale state, prints a fleet digest — `extensions/fleet-bootstrap.ts`, lazy-loaded and fail-soft
 - **Watcher** (3s poll) on state transitions:
   - `done` → chat note `deliverAs: followUp` **without** `triggerTurn` (Firstmate parity: visible, never interrupts)
   - `failed` / `needs_input` → `triggerTurn: true` (wakes you)
