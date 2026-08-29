@@ -183,14 +183,14 @@ read -r -d '' WAVES_JQ <<'JQEOF' || true
       if (.rest | length) == 0 then .
       else
         . as $acc
-        | ($acc.rest | map(select( all(.deps[]; ($acc.resolved | index(.)) != null) ))) as $ready
+        | ($acc.rest | map(select( all(.deps[]; . as $d | ($acc.resolved | index($d)) != null) ))) as $ready
         | if ($ready | length) == 0
           then { waves: ($acc.waves + [ [] ]), resolved: $acc.resolved,
                  rest: $acc.rest, cycles: ($acc.cycles + 1) }
           else { waves: ($acc.waves + [ ($ready | map(.id) | sort) ]),
                  resolved: ($acc.resolved + ($ready | map(.id))),
                  rest: ($acc.rest | map(select( . as $s |
-                       (all(.deps[]; ($acc.resolved | index(.)) != null)) | not ))),
+                       (all(.deps[]; . as $d | ($acc.resolved | index($d)) != null)) | not ))),
                  cycles: $acc.cycles }
           end
       end )
@@ -209,13 +209,14 @@ JQEOF
 # ---------------------------------------------------------------------------
 read -r -d '' INTEGRATE_JQ <<'JQEOF' || true
 def files_of:
-  ( .location | split(",")
-    | map(gsub("^[[:space:]]+|[[:space:]]+$"; ""))
-    | map(select(length > 0))
-    | map(if test(":[0-9]+(-[0-9]+)?$") then
-            sub(":[0-9]+(-[0-9]+)?$"; "") else . end)
-    | map(select(length > 0)) )
-  | if length == 0 then [.location] else unique | sort end;
+  .location as $loc
+  | ( $loc | split(",")
+      | map(gsub("^[[:space:]]+|[[:space:]]+$"; ""))
+      | map(select(length > 0))
+      | map(if test(":[0-9]+(-[0-9]+)?$") then
+              sub(":[0-9]+(-[0-9]+)?$"; "") else . end)
+      | map(select(length > 0)) )
+  | if length == 0 then [$loc] else unique | sort end;
 def uf_find($p; $x):
   ($p[$x|tostring]) as $px |
   if $px == $x then $x else uf_find($p; $px) end;
