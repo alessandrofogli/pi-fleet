@@ -239,7 +239,7 @@ sono curati (niente append infinito) e scritti atomicamente (tmp+rename).
 
 State on disk in `~/.pi/fleet/`: `<id>.json` (state, title, project, cwd, pane/tab, summary, changedFiles), `<id>.done.json` / `<id>.needs-input.json` (child markers), `<id>.abort`, `<id>.log`, `tasks/<id>.brief.md`, `<id>.inbox/` (durable steer messages + ack markers + `handled/`).
 
-### Durable steer & task inbox (5b.2)
+### Durable steer & task inbox
 
 `fleet_steer` is no longer fire-and-forget: the message is **first persisted to disk, then delivered**.
 
@@ -251,7 +251,7 @@ State on disk in `~/.pi/fleet/`: `<id>.json` (state, title, project, cwd, pane/t
 - **`replay:false`**: restores the old fire-and-forget behavior — the message carries `fireAndForget:true`, is delivered once, never re-rung.
 - **External watcher (`fleet-watch.sh`)**: best-effort only — it mentions pending inbox messages in the triage log (heartbeat). The actual re-ring/escalation is **in-process**; the bash loop stays non-blocking.
 
-### Branch outcomes / audit trail (T-004)
+### Branch outcomes / audit trail
 
 Registro **append-only** `~/.pi/fleet/branch-outcomes.jsonl`: una riga JSON per ogni **transizione terminale** di un task (`done`/`failed`/`aborted`) e per ogni evento `needs_input` (rilevante ma non terminale). Erede dello store `fm_branch_outcomes` di Firstmate.
 
@@ -282,7 +282,7 @@ Usa `immediate` per fail-fast: quando un errore rende inutili gli altri task del
 
 > Nota: la policy riguarda SOLO i `failed`. I `done`/`aborted` restano `waitAll` (bufferizzati) anche con `immediate`; `needs_input` continua a rompere il barrier e svegliare subito in entrambi i casi.
 
-### Bootstrap (T-006)
+### Bootstrap
 
 At captain session start (and on demand via the `fleet_bootstrap` tool) pi-fleet runs a best-effort, **zero-config** health pass — it never blocks startup and never installs anything:
 
@@ -337,8 +337,8 @@ Environment opzionali:
 
 ### M2 — `extensions/index.ts` (pi extension)
 
-- 7 `fleet_*` tools; `fleet_launch` spawns the launcher **detached** (double-fork python, survives chat abort)
-- **Bootstrap** (T-006): at `session_start` (captain only) checks tools, cleans stale state, prints a fleet digest — `extensions/fleet-bootstrap.ts`, lazy-loaded and fail-soft
+- 12 `fleet_*` tools; `fleet_launch` spawns the launcher **detached** (double-fork python, survives chat abort)
+- **Bootstrap**: at `session_start` (captain only) checks tools, cleans stale state, prints a fleet digest — `extensions/fleet-bootstrap.ts`, lazy-loaded and fail-soft
 - **Watcher** (3s poll) on state transitions:
   - `done` → chat note `deliverAs: followUp` **without** `triggerTurn` (Firstmate parity: visible, never interrupts)
   - `failed` / `needs_input` → `triggerTurn: true` (wakes you)
@@ -347,7 +347,7 @@ Environment opzionali:
 - **Captain gate**: extension also loads in child sessions (same settings), but watcher/reconcile/provider are active **only** where `cwd = $HOME` (or `PI_FLEET_CAPTAIN=1`) — otherwise each child would wake itself with others' `fleet_notice`
 - **Active model**: `fleet_launch` composes `--model <provider/id>` from the current main model (`ctx.model.provider`/`ctx.model.id`, fallback `PI_PROVIDER`/`PI_DEFAULT_MODEL`) — never the bare id, which `pi models` resolves only when unique and collides across providers
 - **Background-work** registry: built-in fallback (no external dependency); tasks appear in `fleet_status` only
-- **Inbox re-ring (5b.2)**: `fleet_steer` persists messages to `~/.pi/fleet/<id>.inbox/` (durable, ack marker `<seq>.acked`, moved to `handled/`); un-acked messages are re-delivered every 60s (max 5 → escalation wake of the captain via `sendAttention`, helper separate from `sendWake`). `replay:false` keeps the old fire-and-forget behavior. `fleet_status` shows `(inbox: N)` for pending messages
+- **Inbox re-ring**: `fleet_steer` persists messages to `~/.pi/fleet/<id>.inbox/` (durable, ack marker `<seq>.acked`, moved to `handled/`); un-acked messages are re-delivered every 60s (max 5 → escalation wake of the captain via `sendAttention`, helper separate from `sendWake`). `replay:false` keeps the old fire-and-forget behavior. `fleet_status` shows `(inbox: N)` for pending messages
 
 ### L3 — Watcher esterno zero-token (`bin/fleet-watch*.sh` + `extensions/fleet-watch-arm.ts`)
 

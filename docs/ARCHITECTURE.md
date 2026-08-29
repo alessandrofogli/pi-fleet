@@ -108,7 +108,7 @@ Batch di N task lanciati nello stesso messaggio → stesso `groupId`, unico dige
 | Gruppo misto durate (1′ / 10′ / 25′) | Barrier penalizza feedback precoce — voluto. `fleet_status` resta consultabile | — |
 | Task singolo (no `groupId`) | Retrocompatibile: `groupId = task.id`, `groupSize = 1` → wake immediato come prima | come L2/L3 |
 
-`groupMode`: `"barrier"` (default) vs `"streaming"` per-gruppo (futuro); `groupFailPolicy` implementato (T-005): `"waitAll"` (default) — failed bufferizzato nel digest di gruppo — o `"immediate"` — failed sveglia subito il capitano con il contesto del gruppo (`group_failed_immediate`).
+`groupMode`: `"barrier"` (default) vs `"streaming"` per-gruppo (futuro); `groupFailPolicy` implementato: `"waitAll"` (default) — failed bufferizzato nel digest di gruppo — o `"immediate"` — failed sveglia subito il capitano con il contesto del gruppo (`group_failed_immediate`).
 
 ### Diagramma flusso barrier
 
@@ -206,8 +206,8 @@ Batch di N task lanciati nello stesso messaggio → stesso `groupId`, unico dige
 ├── <id>.abort                      # abort signal (timestamp)
 ├── <id>.log                        # launcher log
 ├── <id>.bad                        # parse-failed state file (quarantined)
-├── <id>.inbox/                     # durable steer (5b.2): messaggi <seq>.json + ack markers + handled/
-└── branch-outcomes.jsonl           # audit trail append-only (T-004): transizioni terminali + needs_input
+├── <id>.inbox/                     # durable steer: messaggi <seq>.json + ack markers + handled/
+└── branch-outcomes.jsonl           # audit trail append-only: transizioni terminali + needs_input
 ```
 
 ### `<id>.json` (TaskStateFile)
@@ -270,18 +270,18 @@ See `README.md` Architecture section for M1 (launcher) + M2 (extension watcher/r
 
 ---
 
-## L2.5 — Firstmate Parity batch
+## Features estese
 
-Aggiunte del merge batch 2.5, estendono M1/M2/L3.5 senza cambiare i default (`ship`, `barrier`, `waitAll`, `no-mistakes`). Tutti i moduli nuovi sono lazy-imported e fail-soft (stesso pattern di `fleet-group.ts`).
+Aggiunte successive a M1/M2/L3.5, senza cambiare i default (`ship`, `barrier`, `waitAll`, `no-mistakes`). Tutti i moduli nuovi sono lazy-imported e fail-soft (stesso pattern di `fleet-group.ts`).
 
 | Feature | Dove | Comportamento |
 |---|---|---|
 | **Scout tasks** (`kind: "scout"`) | `fleet_launch`, `bin/herdr-launch.sh`, `extensions/fleet-group.ts` | Il figlio produce solo `report.md` (nessun commit/PR); done-marker con `reportPath`, mergiato dallo stato (`{id}.json`) |
-| **Durable inbox** (5b.2) | `fleet_steer`, `extensions/fleet-inbox.ts`, `bin/fleet-watch.sh` | Messaggio persistito in `<id>.inbox/<seq>.json`, deliver via `runHerdr`, re-ring finché acked (`reRingInFlight` guard, maxReplays poi escalazione `fleet_notice`); `replay:false` = vecchio fire-and-forget |
-| **Delivery posture** (T-003) | `fleet_launch`, `extensions/fleet-posture.ts`, CHILD_PROMPT | `--delivery-posture` (no-mistakes/direct-PR/local-only/yolo); regole iniettate nel prompt figlio, default da `postures.json` |
-| **Branch outcomes** (T-004) | `extensions/fleet-outcomes.ts`, `fleet_status`, `reconcileStaleTasks`, `fleet_abort` | Audit trail append-only `branch-outcomes.jsonl` (transizioni terminali + `needs_input`), best-effort |
-| **groupFailPolicy** (T-005) | `fleet_launch`, `extensions/fleet-group.ts`, watcher | `waitAll` (default) vs `immediate` → evento `group_failed_immediate` sveglia subito il capitano con contesto gruppo |
-| **Bootstrap** (T-006) | hook `session_start`, `extensions/fleet-bootstrap.ts`, tool `fleet_bootstrap` | Check tool, cleanup safe stati stale, digest flotta; mai bloccante (`triggerTurn:false`) |
-| **Captain learnings/prefs** (5b.5) | hook `session_start`, `extensions/fleet-learn.ts`, tool `fleet_learn`/`fleet_captain_pref` | `captain.md`/`captain-shared.md`/`learnings.md` in `~/.pi/fleet/` (mai in git), dedup 24h, scritti atomicamente |
+| **Durable inbox** | `fleet_steer`, `extensions/fleet-inbox.ts`, `bin/fleet-watch.sh` | Messaggio persistito in `<id>.inbox/<seq>.json`, deliver via `runHerdr`, re-ring finché acked (`reRingInFlight` guard, maxReplays poi escalazione `fleet_notice`); `replay:false` = vecchio fire-and-forget |
+| **Delivery posture** | `fleet_launch`, `extensions/fleet-posture.ts`, CHILD_PROMPT | `--delivery-posture` (no-mistakes/direct-PR/local-only/yolo); regole iniettate nel prompt figlio, default da `postures.json` |
+| **Branch outcomes** | `extensions/fleet-outcomes.ts`, `fleet_status`, `reconcileStaleTasks`, `fleet_abort` | Audit trail append-only `branch-outcomes.jsonl` (transizioni terminali + `needs_input`), best-effort |
+| **groupFailPolicy** | `fleet_launch`, `extensions/fleet-group.ts`, watcher | `waitAll` (default) vs `immediate` → evento `group_failed_immediate` sveglia subito il capitano con contesto gruppo |
+| **Bootstrap** | hook `session_start`, `extensions/fleet-bootstrap.ts`, tool `fleet_bootstrap` | Check tool, cleanup safe stati stale, digest flotta; mai bloccante (`triggerTurn:false`) |
+| **Captain learnings/prefs** | hook `session_start`, `extensions/fleet-learn.ts`, tool `fleet_learn`/`fleet_captain_pref` | `captain.md`/`captain-shared.md`/`learnings.md` in `~/.pi/fleet/` (mai in git), dedup 24h, scritti atomicamente |
 
 Struttura `extensions/index.ts` ai confini: `sendWake` (third param `overrides?: {detail?}` per il fail immediate) + helper separato `sendAttention`; `startWatcher` → prima `appendOutcome` best-effort, poi logica group/wake, poi gestione eventi (`group_failed_immediate`, reRing inbox).
