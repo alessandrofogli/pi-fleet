@@ -1235,6 +1235,60 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     },
   });
 
+  // --- fleet_stow (T-012) — pass di pruning delle memorie, IN CODA alla lista tool ---
+  pi.registerTool({
+    name: "fleet_stow",
+    label: "Fleet Stow",
+    description: "Pass di pruning delle memorie capitano/learnings (vedi T-012). Tier aging (30gg) / perishable (7gg) / pinned; stale → refresh o archivio in ~/.pi/fleet/memory-archive.md (mai delete di unici); dedup duplicati; budget di avvio opzionale (default 7500 tok) con report di overflow. dryRun=true → solo report, zero scritture.",
+    promptSnippet: "Run a memory pruning pass (stow)",
+    parameters: Type.Object({
+      dryRun: Type.Optional(Type.Boolean({ description: "true → solo report, zero scritture" })),
+      verbose: Type.Optional(Type.Boolean({ description: "true → dettaglio esteso" })),
+    }),
+    async execute(_toolCallId, params: { dryRun?: boolean; verbose?: boolean }) {
+      const fl = await getFleetLearn();
+      const details: {
+        refreshed: number;
+        archived: number;
+        removed: number;
+        overflow: number;
+        budget: { limitTokens: number; usedTokens: number; overflow: boolean };
+        ok: boolean;
+        dryRun: boolean;
+      } = { refreshed: 0, archived: 0, removed: 0, overflow: 0, budget: { limitTokens: 0, usedTokens: 0, overflow: false }, ok: false, dryRun: params.dryRun === true };
+      if (!fl) {
+        return { content: [{ type: "text", text: "Modulo fleet-learn non caricato (import fallito)." }], details };
+      }
+      try {
+        const report = fl.stowPass(STATE_HOME, { dryRun: params.dryRun === true });
+        details.refreshed = report.refreshed;
+        details.archived = report.archived;
+        details.removed = report.removed;
+        details.overflow = report.overflow;
+        details.budget = report.budget;
+        details.ok = true;
+        const budget = `${report.budget.usedTokens}/${report.budget.limitTokens} tok${report.budget.overflow ? " (OVERFLOW)" : ""}`;
+        const fileCounts = Object.entries(report.fileCounts)
+          .map(([f, n]) => `${f}=${n}`)
+          .join(", ");
+        const lines: string[] = [
+          `[pi-fleet stow] ${report.dryRun ? "dryRun" : "pass"}: refreshed=${report.refreshed}, archived=${report.archived}, removed=${report.removed}, overflow=${report.overflow}, budget=${budget}`,
+          `fileCounts: ${fileCounts}`,
+        ];
+        if (params.verbose === true) {
+          lines.push("Memorie stale/unvalidate/overflow vengono archiviate (mai cancellate: finiscono in memory-archive.md con Provenance).");
+        }
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+          details,
+        };
+      } catch (e) {
+        const text = `fleet_stow fallito: ${e instanceof Error ? e.message : String(e)}`;
+        return { content: [{ type: "text", text }], details };
+      }
+    },
+  });
+
   // ------------------------------------------------------ ciclo di vita -----
   // L3 watcher esterno: feature flag con fallback in-process (M2)
   // Se fleet-watch-arm.ts o bin/fleet-watch-arm.sh esistono e siamo captain,
@@ -1381,6 +1435,36 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         console.log(`[pi-fleet] captain prefs: ${nPrefs} chiavi, ${nLearnings} learnings`);
         if (prefs.trim()) console.log(`[pi-fleet] captain.md bootstrap:\n${prefs.trimEnd()}`);
       } catch { /* best-effort */ }
+    })();
+  });
+
+  // T-012 — stow-lite: pass di pruning memorie (hook SEPARATO da quelli T-006/T-007,
+  // registrazione multipla di session_start voluta). Cadenza max 1 pass/giorno:
+  // guard su ~/.pi/fleet/.stow-last-pass (data odierna). Fail-soft, zero-blocking.
+  pi.on("session_start", () => {
+    if (!IS_CAPTAIN) return;
+    void (async () => {
+      try {
+        const fl = await getFleetLearn();
+        if (!fl || typeof fl.stowPass !== "function") return; // retrocompat: versione senza T-012
+        const lastPassPath = join(STATE_HOME, ".stow-last-pass");
+        const today = new Date().toISOString().slice(0, 10);
+        let alreadyToday = false;
+        try {
+          if (existsSync(lastPassPath)) {
+            const mtime = new Date(statSync(lastPassPath).mtime).toISOString().slice(0, 10);
+            alreadyToday = mtime === today;
+          }
+        } catch { /* fail-soft */ }
+        if (alreadyToday) return;
+        const report = fl.stowPass(STATE_HOME, { dryRun: false });
+        try {
+          writeFileSync(lastPassPath, `${today}\n`, "utf8");
+        } catch { /* fail-soft: il marker è best-effort */ }
+        console.log(
+          `[pi-fleet stow] refreshed=${report.refreshed} archived=${report.archived} removed=${report.removed} overflow=${report.overflow} budget=${report.budget.usedTokens}/${report.budget.limitTokens}`,
+        );
+      } catch { /* best-effort: il pruning non deve mai bloccare l'avvio */ }
     })();
   });
 }
