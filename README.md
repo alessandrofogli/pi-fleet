@@ -1,6 +1,6 @@
 # pi-fleet
 
-Visible sub-agents for [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`): delegate a task and a child `pi` starts in a **dedicated herdr "fleet" workspace** (background tab, `--no-focus`), working in an **isolated treehouse worktree**. The child never steals focus and never occupies space in your tab: it appears **only in the herdr agents sidebar (left)**, whose state rolls up per workspace. The main chat stays free, and the result lands back in the chat — waking you only when the captain is actually needed (failure or input required).
+Visible sub-agents for [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`): delegate a task and a child `pi` starts in a **dedicated herdr "fleet" workspace** (background tab, `--no-focus`), working in an **isolated treehouse worktree**. The child never steals focus and never occupies space in your tab: it appears **only in the herdr agents sidebar (left)**, whose state rolls up per workspace. The main chat stays free, and the result lands back in the chat via a **silent, non-interrupting directive** (`display:false` + `deliverAs: followUp` + `triggerTurn:true`) that the main agent synthesizes for you; failures and `needs_input` are the ones that explicitly demand the captain (in barrier groups, per-task wakes are buffered into a single group digest).
 
 A [Firstmate](https://github.com/kunchenguid/firstmate)-like experience inside pi, without external agents.
 
@@ -24,13 +24,16 @@ A [Firstmate](https://github.com/kunchenguid/firstmate)-like experience inside p
                                   │  done → summary in state
                                   ▼
                        watcher (captain only) → report in chat:
-                         · done          → followUp WITHOUT interruption (Firstmate parity)
-                         · failed/needs_input → wake (triggerTurn) — captain needed
+                         · any terminal state → silent fleet_notice (display:false + deliverAs followUp
+                           + triggerTurn:true) — the main synthesizes; never interrupts an active turn
+                         · failed / needs_input → the captain is explicitly needed
+                         · group barrier → per-task done/failed buffered, one digest at group completion;
+                           needs_input breaks the barrier (immediate wake)
 ```
 
 - **Not child processes**: each sub-agent is an **independent pi session** in a herdr pane. Coordination is via **shared state files in `~/.pi/fleet/`**.
 - Child model = **active model of the main at launch time** (`ctx.model`), unless you pass an explicit `model`.
-- Worktree **always** by default; never auto-merges; PRs only on explicit confirmation.
+- Worktree **always** by default; never auto-merges; PRs only on explicit confirmation or opt-in gate config (`gate.yaml` with `autoPr: true` — see *Configuration — gate di consegna*)
 
 ---
 
@@ -140,7 +143,7 @@ Set `FLEET_PROJECTS_DIR` to the parent of your repos, or just always use absolut
 
 ## Configuration — delivery posture (per project)
 
-Each project declares a **delivery posture** that tells the child agent **how to hand over** the finished work (commit/push/PR policy). The posture is resolved at launch time — `deliveryPosture` param of `fleet_launch` **wins over** the per-project config in `~/.pi/fleet/postures.json`, which wins over the built-in default. It is passed to the child as `DELIVERY_POSTURE` in its prompt; it **instructs the child**, it never enables automatic merges/teardowns in the launcher.
+Each project declares a **delivery posture** that tells the child agent **how to hand over** the finished work (commit/push/PR policy). The posture is resolved at launch time — `deliveryPosture` param of `fleet_launch` **wins over** the per-project config in `~/.pi/fleet/postures.json`, which wins over the built-in default. It is passed to the child as `DELIVERY_POSTURE` in its prompt; it **instructs the child** — the launcher never merges automatically (merge authority is always the captain).
 
 | Posture | Meaning |
 |---|---|
@@ -211,6 +214,8 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 
 ### Manual commands (extension tools)
 
+13 `fleet_*` tools in total: 12 registered in `extensions/index.ts` (`fleet_launch`, `fleet_status`, `fleet_outcomes`, `fleet_peek`, `fleet_steer`, `fleet_posture`, `fleet_abort`, `fleet_attach`, `fleet_bootstrap`, `fleet_learn`, `fleet_captain_pref`, `fleet_stow`) plus `fleet_watch_arm_pi` in `extensions/fleet-watch-arm.ts`.
+
 | Tool | What it does |
 |---|---|
 | `fleet_launch` | Launch a task (title, brief, `project` **required** — absolute path or short name if `FLEET_PROJECTS_DIR` is set; `model` optional; `timeoutMin` optional; `kind` optional: `ship` (default) o `scout` solo-indagine) |
@@ -224,6 +229,7 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 | `fleet_bootstrap` | Verify tools, clean stale state, print a fleet digest (optional `verbose`) |
 | `fleet_learn` | Record an operational learning in `learnings.md` (`title`, `fact`, `implication?`) |
 | `fleet_captain_pref` | Get/set a captain preference (`action`, `key`, `value?` per set, `shared?`) |
+| `fleet_stow` | Memory pruning pass (`dryRun?`, `verbose?`); stale entries refreshed or archived, dedup, optional budget — see *Memorie: pruning* |
 | `fleet_watch_arm_pi` | Start the first watcher cycle or repair a cycle reported missing/failed/unhealthy (re-arming is otherwise automatic) |
 
 #### Task scout (solo-indagine)
@@ -331,7 +337,7 @@ Formato riga (una riga = un JSON, `\n` terminato):
 
 Lancia N task nello stesso messaggio → formano automaticamente un gruppo.
 Vedrai un unico digest verboso quando tutti hanno finito. `needs_input` sveglia subito.
-`fleet_status` mostra `grp:xxx 2/3`, `fleet_status --group <id>` filtra.
+`fleet_status` mostra `grp:xxx 2/3`; `fleet_status(groupId: <id>)` filtra per gruppo (groupId completo o prefisso 8).
 
 Dettaglio: `groupId`/`groupSize`/`groupLabel`/`groupMode` in `{id}.json`; stato gruppo persistito in `~/.pi/fleet/.wake-groups/{groupId}.json` per recovery dopo restart Pi. `fleet_status` raggruppa per `groupId` e mostra `Gruppo <id> (label) — 2/3 completi:` + `Singoli:`.
 
@@ -408,11 +414,11 @@ Environment opzionali:
 
 ### M2 — `extensions/index.ts` (pi extension)
 
-- 12 `fleet_*` tools; `fleet_launch` spawns the launcher **detached** (double-fork python, survives chat abort)
+- 13 `fleet_*` tools (see *Usage → Manual commands* for the full list); `fleet_launch` spawns the launcher **detached** via `spawn("bash", [...], { detached: true })` + `unref` (survives chat abort; `python` is not involved — it only appears as a prerequisite check in `bin/setup-fleet.sh`)
 - **Bootstrap**: at `session_start` (captain only) checks tools, cleans stale state, prints a fleet digest — `extensions/fleet-bootstrap.ts`, lazy-loaded and fail-soft
 - **Watcher** (3s poll) on state transitions:
-  - `done` → chat note `deliverAs: followUp` **without** `triggerTurn` (Firstmate parity: visible, never interrupts)
-  - `failed` / `needs_input` → `triggerTurn: true` (wakes you)
+  - every terminal transition (`done`, `failed`, `needs_input`) → `fleet_notice` with `display: false` + `deliverAs: followUp` **and** `triggerTurn: true` — the raw message is hidden and the main agent synthesizes the report for you; delivery never interrupts an active turn
+  - group barrier (L3.5): per-task `done`/`failed` are **buffered** (no per-task wake); a single group digest (`sendGroupDigest`) is delivered when the group completes; `needs_input` breaks the barrier and wakes immediately
 - **Seeding** at startup: already-present tasks don't produce phantom wakes
 - **Reconcile** at startup: active tasks without a live herdr pane → `done`/`failed`/`aborted` (with marker checks)
 - **Captain gate**: extension also loads in child sessions (same settings), but watcher/reconcile/provider are active **only** where `cwd = $HOME` (or `PI_FLEET_CAPTAIN=1`) — otherwise each child would wake itself with others' `fleet_notice`
@@ -426,7 +432,7 @@ Wake **even when Pi is closed**. Zero-token: the model runs only on actionable e
 
 - **When you need it**: you close Pi (or Pi crashes) while tasks are running; without L3 the wake is lost.
 - **How to enable**: automatic — `extensions/fleet-watch-arm.ts` arms at `session_start` (and drains the queue). Manual: `fleet_watch_arm_pi` / `bash bin/fleet-watch-arm.sh --restart`.
-- **Durable queue**: `~/.pi/fleet/.wake-queue/*.json` survives Pi restarts; drained at next open via `fleet_wake_drain_pi` / `bash bin/fleet-wake-drain.sh --count` and acknowledged with `--ack`.
+- **Durable queue**: `~/.pi/fleet/.wake-queue/*.json` survives Pi restarts; at the next open the arm layer drains it via `bin/fleet-wake-drain.sh` (default: lists pending records; `--count` prints only the pending count; `--ack-through <SEQ>` acknowledges records after delivery in chat).
 - **Singleton lock**: `~/.pi/fleet/.watch.lock` + beacon `~/.pi/fleet/.last-watcher-beat` (`bin/fleet-lock-lib.sh`, `FLEET_STATE_HOME` shared with the extension).
 - **What it does**: `fleet-watch.sh` polls (3s) and absorbs benign (`running` with fresh beat); on `done`/`failed`/`needs_input`/new queue file it writes the queue and exits with the reason — the arm layer re-arms before waking.
 - **Fallback**: if L3 scripts are absent, L2 still works (extension catches and degrades).
@@ -470,4 +476,4 @@ No machine-specific dependencies: state lives in `~/.pi/fleet/`, projects are re
 
 - The repo does not and must not contain credentials; API keys live in `~/.pi/agent/auth.json` (outside the repo).
 - Tasks run in isolated worktrees; the child never modifies the shared working tree.
-- Never auto-merges: changed files are reported as a list, PR only on explicit confirmation.
+- Never auto-merges: changed files are reported as a list; PR only on explicit confirmation or opt-in gate config (`gate.yaml` `autoPr: true`, opened by the launcher after a green gate).
