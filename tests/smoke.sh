@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
 #
-# pi-fleet · smoke test end-to-end (T-008)
+# pi-fleet · end-to-end smoke test (T-008)
 #
-# Collauda la CATENA DI BASE del sistema su un repo scratch temporaneo:
+# Exercises the BASE CHAIN of the system on a temporary scratch repo:
 #
-#   launcher (bin/herdr-launch.sh) → pi figlio nel pane herdr (workspace "fleet",
-#   sidebar only) → done-marker su disco → stato finale su disco
+#   launcher (bin/herdr-launch.sh) → pi child in the herdr pane ("fleet" workspace,
+#   sidebar only) → done-marker on disk → final state on disk
 #
-# Isolamento: FLEET_STATE_HOME punta a /tmp/fleet-smoke-state-* → nessun file
-# scritto nella flotta reale (~/.pi/fleet). La workspace herdr reale viene usata
-# (è il punto del test: catena reale), ma il pane/tab viene chiuso dal launcher
-# al termine e lo stato su disco non è mai toccato.
+# Isolation: FLEET_STATE_HOME points to /tmp/fleet-smoke-state-* → no file is
+# written in the real fleet (~/.pi/fleet). The real herdr workspace is used
+# (that's the point of the test: real chain), but the pane/tab is closed by the
+# launcher at the end and the state on disk is never touched.
 #
-# Uso:
+# Usage:
 #   bash tests/smoke.sh
 #
 # Exit codes:
-#   0  verde — tutta la catena ok (state done, esito.txt con SMOKE_OK, done-marker consumato)
-#   1  fallito — un check o il launcher sono falliti
-#   2  prerequisiti mancanti — herdr assente o irraggiungibile, jq assente
-#      (skipped documentato, MAI falso verde)
+#   0  green — the whole chain ok (state done, esito.txt with SMOKE_OK, done-marker consumed)
+#   1  failed — a check or the launcher failed
+#   2  missing prerequisites — herdr absent or unreachable, jq absent
+#      (documented skip, NEVER a false green)
 #
-# Environment (tutti opzionali):
-#   HERDR_SESSION          sessione herdr da usare (default: "default")
-#   PI_FLEET_SMOKE_MODEL   override modello figlio, full id "provider/id"
-#                          (default: catena env del launcher, es. PI_PROVIDER/PI_MODEL)
-#   SMOKE_TIMEOUT_S        timeout esterno del launcher, secondi (default: 480)
-#   SMOKE_KEEP=1           NON rimuovere scratch/state alla fine (debug)
+# Environment (all optional):
+#   HERDR_SESSION          herdr session to use (default: "default")
+#   PI_FLEET_SMOKE_MODEL   child model override, full id "provider/id"
+#                          (default: launcher env chain, e.g. PI_PROVIDER/PI_MODEL)
+#   SMOKE_TIMEOUT_S        external launcher timeout, seconds (default: 480)
+#   SMOKE_KEEP=1           do NOT remove scratch/state at the end (debug)
 #
 set -u
 
@@ -53,8 +53,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Timeout robusto: `timeout` (GNU) o `gtimeout` (coreutils su macOS) se presenti;
-# altrimenti wrapper POSIX con background + kill.
+# Robust timeout: `timeout` (GNU) or `gtimeout` (coreutils on macOS) if present;
+# otherwise a POSIX wrapper with background + kill.
 run_with_timeout() {
   local secs="$1"; shift
   if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; return $?; fi
@@ -65,21 +65,21 @@ run_with_timeout() {
   local killer=$!
   wait "$pid"; rc=$?
   kill "$killer" 2>/dev/null
-  wait "$killer" 2>/dev/null   # consuma la notifica di job termination (niente "Terminated" su stderr)
+  wait "$killer" 2>/dev/null   # consume the job termination notification (no "Terminated" on stderr)
   return $rc
 }
 
 # ---------------------------------------------------------------- [1/6] preflight
-log "[1/6] preflight: binari, herdr raggiungibile, repo scratch"
+log "[1/6] preflight: binaries, herdr reachable, scratch repo"
 
-command -v herdr >/dev/null 2>&1 || die2 "herdr non trovato in PATH — avvia herdr e riprova"
-command -v jq   >/dev/null 2>&1 || die2 "jq non trovato in PATH (brew install jq)"
-command -v git  >/dev/null 2>&1 || die2 "git non trovato in PATH"
-[[ -f "$LAUNCHER" ]] || die "launcher non trovato: $LAUNCHER"
+command -v herdr >/dev/null 2>&1 || die2 "herdr not found in PATH — start herdr and retry"
+command -v jq   >/dev/null 2>&1 || die2 "jq not found in PATH (brew install jq)"
+command -v git  >/dev/null 2>&1 || die2 "git not found in PATH"
+[[ -f "$LAUNCHER" ]] || die "launcher not found: $LAUNCHER"
 
 if ! herdr --session "$SESSION" workspace list >/dev/null 2>&1; then
-  die2 "herdr non raggiungibile (sessione '$SESSION'): workspace list fallito — \
-il daemon herdr è attivo? (la smoke test è SKIPPATA, non falsa verde)"
+  die2 "herdr not reachable (session '$SESSION'): workspace list failed — \
+is the herdr daemon running? (the smoke test is SKIPPED, no false green)"
 fi
 
 mkdir -p "$SCRATCH" "$STATE_DIR"
@@ -90,121 +90,121 @@ mkdir -p "$SCRATCH" "$STATE_DIR"
     && printf '# fleet smoke scratch\n' > README.md \
     && git add README.md \
     && git commit -qm "init smoke" ) \
-  || die "creazione repo scratch fallita: $SCRATCH"
-log "repo scratch: $SCRATCH (commit iniziale ok)"
+  || die "scratch repo creation failed: $SCRATCH"
+log "scratch repo: $SCRATCH (initial commit ok)"
 
-# ---------------------------------------------------------------- [2/6] stato isolato
-log "[2/6] stato isolato: FLEET_STATE_HOME=$STATE_DIR (flotta reale ~/.pi/fleet intatta)"
+# ---------------------------------------------------------------- [2/6] isolated state
+log "[2/6] isolated state: FLEET_STATE_HOME=$STATE_DIR (real fleet ~/.pi/fleet intact)"
 export FLEET_STATE_HOME="$STATE_DIR"
 
 # ---------------------------------------------------------------- [3/6] brief
-log "[3/6] breve brief per il figlio ($BRIEF_FILE)"
+log "[3/6] short brief for the child ($BRIEF_FILE)"
 cat > "$BRIEF_FILE" <<'EOF'
-# T-008 smoke — task figlio minimo
+# T-008 smoke — minimal child task
 
-Obiettivo: verificare la catena launcher → figlio → done-marker → stato su disco.
-Non serve altro: questo task è volutamente banale.
+Goal: verify the launcher → child → done-marker → on-disk state chain.
+Nothing else is needed: this task is deliberately trivial.
 
-1. Crea il file `esito.txt` nella ROOT del cwd (niente sottocartelle) e scrivici
-   ESATTAMENTE una riga: `SMOKE_OK` + la versione di pi (esegui `pi --version`
-   se utile e aggiungila). Esempio: `SMOKE_OK pi 0.84.x`
+1. Create the file `esito.txt` at the ROOT of the cwd (no subfolders) and write
+   EXACTLY one line: `SMOKE_OK` + the pi version (run `pi --version` if useful
+   and append it). Example: `SMOKE_OK pi 0.84.x`
 
-2. Termina scrivendo il done-marker nel file DONE_PATH che ti ha indicato il
-   launcher, formato JSON:
+2. Finish by writing the done-marker to the DONE_PATH file indicated by the
+   launcher, in JSON format:
    {"status":"done","summary":"...","changedFiles":["esito.txt"]}
-   - summary: breve e autocontenuta, con l'esito reale (es. "SMOKE_OK su pi x.y.z — esito.txt scritto").
-   - changedFiles: ["esito.txt"] (path relativo al cwd).
+   - summary: short and self-contained, with the real outcome (e.g. "SMOKE_OK on pi x.y.z — esito.txt written").
+   - changedFiles: ["esito.txt"] (path relative to the cwd).
 
-3. NON committare, NON fare pull/push di nessun tipo, NON chiedere input:
-   scrivi i due file e termina.
+3. Do NOT commit, do NOT pull/push of any kind, do NOT ask for input:
+   write the two files and finish.
 EOF
-log "brief scritto"
+log "brief written"
 
 # ---------------------------------------------------------------- [4/6] launcher
 MODEL_FLAG=()
 if [[ -n "${PI_FLEET_SMOKE_MODEL:-}" ]]; then
   MODEL_FLAG=(--model "$PI_FLEET_SMOKE_MODEL")
-  log "modello figlio (override env): $PI_FLEET_SMOKE_MODEL"
+  log "child model (env override): $PI_FLEET_SMOKE_MODEL"
 else
-  log "modello figlio: catena env del launcher (PI_PROVIDER/PI_MODEL o default)"
+  log "child model: launcher env chain (PI_PROVIDER/PI_MODEL or default)"
 fi
 
-log "[4/6] lancio launcher: timeout interno 5min, timeout esterno ${LAUNCH_TIMEOUT_S}s"
+log "[4/6] launching the launcher: internal timeout 5min, external timeout ${LAUNCH_TIMEOUT_S}s"
 run_with_timeout "$LAUNCH_TIMEOUT_S" \
   "$LAUNCHER" "smoke-$TS" "@$BRIEF_FILE" \
   --project "$SCRATCH" --no-worktree --task-id "$TASK_ID" --timeout-min 5 \
   "${MODEL_FLAG[@]+"${MODEL_FLAG[@]}"}"
 RC=$?
-log "[4/6] launcher uscito con exit code: $RC"
+log "[4/6] launcher exited with code: $RC"
 if [[ $RC -ne 0 ]]; then
   if [[ $RC -eq 143 || $RC -eq 137 ]]; then
-    die "launcher terminato dal wrapper dopo ${LAUNCH_TIMEOUT_S}s (timeout esterno): \
-il task non è arrivato al done-marker in tempo — controlla herdr e il pane"
+    die "launcher terminated by the wrapper after ${LAUNCH_TIMEOUT_S}s (external timeout): \
+the task did not reach the done-marker in time — check herdr and the pane"
   fi
-  die "launcher fallito (exit $RC) — vedi log [fleet] sopra"
+  die "launcher failed (exit $RC) — see the [fleet] logs above"
 fi
 
-# ---------------------------------------------------------------- [5/6] verifiche
-log "[5/6] verifica esito (state json, esito.txt, done-marker consumato)"
+# ---------------------------------------------------------------- [5/6] verifications
+log "[5/6] verifying outcome (state json, esito.txt, done-marker consumed)"
 
 STATE_JSON="$STATE_DIR/$TASK_ID.json"
 DONE_JSON="$STATE_DIR/$TASK_ID.done.json"
 ESITO_FILE="$SCRATCH/esito.txt"
 FAILS=0
 
-# 5.1 state json: esiste, state == done, summary non vuota
+# 5.1 state json: exists, state == done, non-empty summary
 if [[ ! -f "$STATE_JSON" ]]; then
-  FAILS=$((FAILS + 1)); log "FAIL: stato json mancante: $STATE_JSON"
+  FAILS=$((FAILS + 1)); log "FAIL: missing state json: $STATE_JSON"
 else
   S="$(jq -r '.state // ""' "$STATE_JSON")"
   SUM="$(jq -r '.summary // ""' "$STATE_JSON")"
   FILES="$(jq -c '.changedFiles // []' "$STATE_JSON")"
   log "  state json: state=$S changedFiles=$FILES"
-  [[ "$S" == "done" ]] || { FAILS=$((FAILS + 1)); log "FAIL: state='$S', atteso 'done'"; }
-  [[ -n "$SUM" ]] || { FAILS=$((FAILS + 1)); log "FAIL: summary vuota nello state json"; }
+  [[ "$S" == "done" ]] || { FAILS=$((FAILS + 1)); log "FAIL: state='$S', expected 'done'"; }
+  [[ -n "$SUM" ]] || { FAILS=$((FAILS + 1)); log "FAIL: empty summary in the state json"; }
 fi
 
-# 5.2 esito.txt nel repo scratch contiene SMOKE_OK
+# 5.2 esito.txt in the scratch repo contains SMOKE_OK
 if [[ -f "$ESITO_FILE" ]]; then
   if grep -q "SMOKE_OK" "$ESITO_FILE" 2>/dev/null; then
-    log "  esito.txt: ok (contenuto: $(tr '\n' ' ' < "$ESITO_FILE"))"
+    log "  esito.txt: ok (content: $(tr '\n' ' ' < "$ESITO_FILE"))"
   else
-    FAILS=$((FAILS + 1)); log "FAIL: esito.txt non contiene SMOKE_OK: $(cat "$ESITO_FILE")"
+    FAILS=$((FAILS + 1)); log "FAIL: esito.txt does not contain SMOKE_OK: $(cat "$ESITO_FILE")"
   fi
 else
-  FAILS=$((FAILS + 1)); log "FAIL: esito.txt mancante in $SCRATCH"
+  FAILS=$((FAILS + 1)); log "FAIL: esito.txt missing in $SCRATCH"
 fi
 
-# 5.3 done-marker consumato (il launcher lo rimuove dopo aver scritto lo stato)
+# 5.3 done-marker consumed (the launcher removes it after writing the state)
 if [[ -f "$DONE_JSON" ]]; then
-  FAILS=$((FAILS + 1)); log "FAIL: done-marker ancora presente (non consumato): $DONE_JSON"
+  FAILS=$((FAILS + 1)); log "FAIL: done-marker still present (not consumed): $DONE_JSON"
 else
-  log "  done-marker: consumato (rimosso dal launcher)"
+  log "  done-marker: consumed (removed by the launcher)"
 fi
 
 if [[ $FAILS -gt 0 ]]; then
-  die "verifiche fallite: $FAILS check non passati"
+  die "verifications failed: $FAILS checks not passed"
 fi
 
-# ---------------------------------------------------------------- [6/6] esito
-log "[6/6] tutti i check verdi"
-log "ESITO: OK — catena launcher → figlio → done-marker → stato verificata (task $TASK_ID)"
+# ---------------------------------------------------------------- [6/6] outcome
+log "[6/6] all checks green"
+log "OUTCOME: OK — launcher → child → done-marker → state chain verified (task $TASK_ID)"
 
 # ══════════════════════════════════════════════════════════ gate T-011 ════════════════
-# Scenario gate meccanico (T-011) su repo scratch dedicati con gate.yaml e
-# autoPr:false (NO remote → niente PR reale). Il launcher riceve --gate direttamente
-# (stesso flag che l'estensione passa quando posture=no-mistakes E gate.yaml esiste).
+# Mechanical gate (T-011) scenario on dedicated scratch repos with gate.yaml and
+# autoPr:false (NO remote → no real PR). The launcher receives --gate directly
+# (the same flag the extension passes when posture=no-mistakes AND gate.yaml exists).
 #
-#   Case A — test rotto  → task failed, gate rosso, report presente, nessuna PR
-#   Case B — test verde  → task done, gate verde, nessuna PR (autoPr false)
+#   Case A — broken test → task failed, red gate, report present, no PR
+#   Case B — green test  → task done, green gate, no PR (autoPr false)
 #
-# La PR automatica vera (remote GitHub + gh-axi) è FUORI da questo smoke automatico:
-# procedura manuale documentata nel summary del task e nel README.
+# The real automatic PR (GitHub remote + gh-axi) is OUTSIDE this automatic smoke:
+# manual procedure documented in the task summary and in the README.
 
 GATE_RUN="$REPO_ROOT/bin/gate-run.sh"
 [[ -f "$GATE_RUN" ]] || die "gate-run.sh non trovato: $GATE_RUN"
 
-log "[7/9] gate (T-011): setup scratch gate.yaml + brief case A/B"
+log "[7/9] gate (T-011): scratch setup gate.yaml + brief case A/B"
 TSG="$(date +%s)"
 SCRATCH_A="/tmp/fleet-gate-a-$TSG"
 SCRATCH_B="/tmp/fleet-gate-b-$TSG"
@@ -214,10 +214,10 @@ BRIEF_A="$STATE_A/brief.md"
 BRIEF_B="$STATE_B/brief.md"
 TASK_A="gate-a-$TSG"
 TASK_B="gate-b-$TSG"
-mkdir -p "$STATE_A" "$STATE_B"   # serve prima dei brief (heredoc sopra); gli scratch li crea setup_gate_scratch
+mkdir -p "$STATE_A" "$STATE_B"   # needed before the briefs (heredoc above); the scratches are created by setup_gate_scratch
 
-# cleanup esteso: anche gli scratch/state dei gate — unico EXIT trap che
-# preserva il cleanup base originale (in bash l'ultimo trap EXIT sostituisce i precedenti)
+# extended cleanup: also the gate scratch/state — single EXIT trap that
+# preserves the original base cleanup (in bash the last EXIT trap replaces the previous ones)
 _cleanup_gate() {
   [[ "$KEEP" == "1" ]] && return 0
   rm -rf "$SCRATCH_A" "$SCRATCH_B" "$STATE_A" "$STATE_B"
@@ -227,8 +227,8 @@ trap 'cleanup; _cleanup_gate' EXIT
 setup_gate_scratch() {
   local dir="$1" state="$2"
   mkdir -p "$dir" "$state"
-  # gate.yaml scritto FUORI della subshell (heredoc + &&-chain in ( ) non è
-  # parsabile da bash): content = gate con autoPr false (no remote → niente PR)
+  # gate.yaml written OUTSIDE the subshell (heredoc + &&-chain in ( ) is not
+  # parseable by bash): content = gate with autoPr false (no remote → no PR)
   cat > "$dir/gate.yaml" <<'YEOF'
 posture: no-mistakes
 autoPr: false
@@ -244,53 +244,53 @@ YEOF
       && printf '# fleet gate scratch\n' > README.md \
       && git add README.md gate.yaml \
       && git commit -qm "init gate smoke" ) \
-    || die "creazione repo scratch gate fallita: $dir"
+    || die "gate scratch repo creation failed: $dir"
 }
 
-# ---- brief dei due case ----
+# ---- briefs of the two cases ----
 cat > "$BRIEF_A" <<'EOF'
-# T-011 smoke — gate ROSSO (case A)
+# T-011 smoke — RED gate (case A)
 
-Progetto scratch con gate.yaml: il check `gate-test` esegue `bash gate-test.sh` (hard).
+Scratch project with gate.yaml: the `gate-test` check runs `bash gate-test.sh` (hard).
 
-1. Crea nella root del cwd il file `gate-test.sh` con questo contenuto ESATTO
-   (test volutamente ROTTO — termina con exit 1):
+1. Create at the root of the cwd the file `gate-test.sh` with this EXACT content
+   (deliberately BROKEN test — it exits with 1):
 
        #!/usr/bin/env bash
-       echo "gate rosso (voluto)"; exit 1
+       echo "red gate (intentional)"; exit 1
 
-2. NON ripararlo: è il caso di verifica del gate ROSSO. Se il gate ti chiede
-   di fixare, NON fixare (istruzione esplicita del brief).
+2. Do NOT fix it: this is the RED gate verification case. If the gate asks you
+   to fix, do NOT fix (explicit instruction of the brief).
 
-3. Esegui il gate (sezione GATE della tua prompt) e poi scrivi il done-marker
-   nel file DONE_PATH con status "failed" e nella summary il contenuto
-   essenziale del report del gate (nomi checks + exit code + overall).
+3. Run the gate (GATE section of your prompt) and then write the done-marker
+   to the DONE_PATH file with status "failed" and in the summary the essential
+   content of the gate report (check names + exit codes + overall).
 
-4. NON committare, NON fare push, NON aprire PR.
+4. Do NOT commit, do NOT push, do NOT open a PR.
 EOF
 cat > "$BRIEF_B" <<'EOF'
-# T-011 smoke — gate VERDE (case B)
+# T-011 smoke — GREEN gate (case B)
 
-Progetto scratch con gate.yaml: il check `gate-test` esegue `bash gate-test.sh` (hard).
+Scratch project with gate.yaml: the `gate-test` check runs `bash gate-test.sh` (hard).
 
-1. Crea nella root del cwd il file `gate-test.sh` che termina con exit 0:
+1. Create at the root of the cwd the file `gate-test.sh` that exits with 0:
 
        #!/usr/bin/env bash
-       echo "gate verde"; exit 0
+       echo "green gate"; exit 0
 
-2. Esegui il gate (sezione GATE della tua prompt): deve risultare VERDE al
-   primo round (nessun fix necessario).
+2. Run the gate (GATE section of your prompt): it must be GREEN at the
+   first round (no fix needed).
 
-3. A verde scrivi il done-marker nel file DONE_PATH con status "done" e nel
-   JSON il campo gate:
+3. On green write the done-marker to the DONE_PATH file with status "done" and
+   in the JSON the gate field:
        "gate":{"passed":true,"rounds":1,"reportPath":"gate/report.json"}
 
-4. NON committare, NON fare push, NON aprire PR.
+4. Do NOT commit, do NOT push, do NOT open a PR.
 EOF
-log "  scratch A: $SCRATCH_A · scratch B: $SCRATCH_B (state isolati in /tmp)"
+log "  scratch A: $SCRATCH_A · scratch B: $SCRATCH_B (isolated states in /tmp)"
 
 # ------------------------------------------------------------- [8/9] gate case A
-log "[8/9] gate case A (test rotto → atteso failed, gate rosso, nessuna PR)"
+log "[8/9] gate case A (broken test → expected failed, red gate, no PR)"
 setup_gate_scratch "$SCRATCH_A" "$STATE_A"
 export FLEET_STATE_HOME="$STATE_A"
 run_with_timeout "$LAUNCH_TIMEOUT_S" \
@@ -301,29 +301,29 @@ run_with_timeout "$LAUNCH_TIMEOUT_S" \
   >/dev/null 2>&1
 RC_A=$?
 log "  case A: launcher exit=$RC_A"
-[[ $RC_A -eq 0 ]] || die "case A: launcher fallito (exit $RC_A)"
+[[ $RC_A -eq 0 ]] || die "case A: launcher failed (exit $RC_A)"
 SA="$STATE_A/$TASK_A.json"
 FAILS=0
-[[ -f "$SA" ]] || die "case A: state json mancante: $SA"
+[[ -f "$SA" ]] || die "case A: missing state json: $SA"
 ST_A="$(jq -r '.state // ""' "$SA")"
 GP_A="$(jq -r '.gate.passed // false' "$SA")"
 PR_A="$(jq -r '.prUrl // ""' "$SA")"
 log "  case A: state=$ST_A gate.passed=$GP_A prUrl='$PR_A'"
-[[ "$ST_A" == "failed" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: state='$ST_A', atteso failed"; }
-[[ "$GP_A" == "false" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: gate.passed='$GP_A', atteso false"; }
-[[ -z "$PR_A" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: prUrl presente='$PR_A', atteso vuoto (autoPr false)"; }
+[[ "$ST_A" == "failed" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: state='$ST_A', expected failed"; }
+[[ "$GP_A" == "false" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: gate.passed='$GP_A', expected false"; }
+[[ -z "$PR_A" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: prUrl present='$PR_A', expected empty (autoPr false)"; }
 if [[ -f "$SCRATCH_A/gate/report.json" ]]; then
   REP_A="$(jq -r '.overall // ""' "$SCRATCH_A/gate/report.json")"
-  log "  case A: report presente, overall=$REP_A"
-  [[ "$REP_A" == "red" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: overall report='$REP_A', atteso red"; }
+  log "  case A: report present, overall=$REP_A"
+  [[ "$REP_A" == "red" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: report overall='$REP_A', expected red"; }
 else
-  FAILS=$((FAILS + 1)); log "  FAIL: report gate mancante: $SCRATCH_A/gate/report.json"
+  FAILS=$((FAILS + 1)); log "  FAIL: missing gate report: $SCRATCH_A/gate/report.json"
 fi
-[[ $FAILS -eq 0 ]] || die "case A: $FAILS check non passati"
-log "  case A OK: failed + gate rosso + report presente + nessuna PR"
+[[ $FAILS -eq 0 ]] || die "case A: $FAILS checks not passed"
+log "  case A OK: failed + red gate + report present + no PR"
 
 # ------------------------------------------------------------- [9/9] gate case B
-log "[9/9] gate case B (test verde → atteso done, gate verde, nessuna PR)"
+log "[9/9] gate case B (green test → expected done, green gate, no PR)"
 setup_gate_scratch "$SCRATCH_B" "$STATE_B"
 export FLEET_STATE_HOME="$STATE_B"
 run_with_timeout "$LAUNCH_TIMEOUT_S" \
@@ -334,26 +334,26 @@ run_with_timeout "$LAUNCH_TIMEOUT_S" \
   >/dev/null 2>&1
 RC_B=$?
 log "  case B: launcher exit=$RC_B"
-[[ $RC_B -eq 0 ]] || die "case B: launcher fallito (exit $RC_B)"
+[[ $RC_B -eq 0 ]] || die "case B: launcher failed (exit $RC_B)"
 SB="$STATE_B/$TASK_B.json"
 FAILS=0
-[[ -f "$SB" ]] || die "case B: state json mancante: $SB"
+[[ -f "$SB" ]] || die "case B: missing state json: $SB"
 ST_B="$(jq -r '.state // ""' "$SB")"
 GP_B="$(jq -r '.gate.passed // false' "$SB")"
 PR_B="$(jq -r '.prUrl // ""' "$SB")"
 log "  case B: state=$ST_B gate.passed=$GP_B prUrl='$PR_B'"
-[[ "$ST_B" == "done" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: state='$ST_B', atteso done"; }
-[[ "$GP_B" == "true" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: gate.passed='$GP_B', atteso true"; }
-[[ -z "$PR_B" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: prUrl presente='$PR_B', atteso vuoto (autoPr false)"; }
+[[ "$ST_B" == "done" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: state='$ST_B', expected done"; }
+[[ "$GP_B" == "true" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: gate.passed='$GP_B', expected true"; }
+[[ -z "$PR_B" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: prUrl present='$PR_B', expected empty (autoPr false)"; }
 if [[ -f "$SCRATCH_B/gate/report.json" ]]; then
   REP_B="$(jq -r '.overall // ""' "$SCRATCH_B/gate/report.json")"
-  log "  case B: report presente, overall=$REP_B"
-  [[ "$REP_B" == "green" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: overall report='$REP_B', atteso green"; }
+  log "  case B: report present, overall=$REP_B"
+  [[ "$REP_B" == "green" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: report overall='$REP_B', expected green"; }
 else
-  FAILS=$((FAILS + 1)); log "  FAIL: report gate mancante: $SCRATCH_B/gate/report.json"
+  FAILS=$((FAILS + 1)); log "  FAIL: missing gate report: $SCRATCH_B/gate/report.json"
 fi
-[[ $FAILS -eq 0 ]] || die "case B: $FAILS check non passati"
-log "  case B OK: done + gate verde + report presente + nessuna PR"
+[[ $FAILS -eq 0 ]] || die "case B: $FAILS checks not passed"
+log "  case B OK: done + green gate + report present + no PR"
 
-log "ESITO GATE (T-011): OK — case A (rosso→failed, no PR) e case B (verde→done, no PR)"
+log "GATE OUTCOME (T-011): OK — case A (red→failed, no PR) and case B (green→done, no PR)"
 exit 0
