@@ -131,6 +131,8 @@ resolve_fleet_workspace() {
   # (roll-up per workspace). `workspace list` NON espone la cwd, quindi il
   # match è per label; se esistono più workspace "fleet" prende la prima e
   # riusa sempre quella nei lanci successivi.
+  # NOTA stdout pulito: la funzione è usata dentro $(...) → i log vanno su
+  # stderr, su stdout SOLO l'id della workspace.
   local ws_out ws
   ws_out="$(herdr_cli workspace list)" || ws_out=""
   ws="$(printf '%s' "$ws_out" | jq -r --arg l "fleet" \
@@ -138,11 +140,11 @@ resolve_fleet_workspace() {
     || ws=""
   [[ -n "$ws" ]] && { echo "$ws"; return 0; }
   for ((try = 1; try <= 3; try++)); do
-    # NOTA: `workspace create` risponde con .result.workspace.workspace_id
-    # (shape: .result.workspace / .result.tab / .result.root_pane).
+    # `workspace create` risponde con .result.workspace.workspace_id
+    # (shape documentata: .result.workspace / .result.tab / .result.root_pane).
     ws="$(herdr_cli workspace create --label "fleet" --cwd "$PROJECT" --no-focus \
       | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)" || ws=""
-    [[ -n "$ws" ]] && { log "workspace fleet creata: $ws"; echo "$ws"; return 0; }
+    [[ -n "$ws" ]] && { log "workspace fleet creata: $ws" >&2; echo "$ws"; return 0; }
     sleep 1
     ws_out="$(herdr_cli workspace list)" || continue
     ws="$(printf '%s' "$ws_out" | jq -r --arg l "fleet" \
