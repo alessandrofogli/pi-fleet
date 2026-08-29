@@ -34,6 +34,7 @@ export interface GroupTaskInfo {
   groupSize: number;
   groupLabel?: string;
   groupMode: "barrier" | "streaming";
+  kind?: "ship" | "scout";
 }
 
 /**
@@ -62,6 +63,7 @@ export interface TaskStateFile {
   groupSize?: number;
   groupLabel?: string;
   groupMode?: "barrier" | "streaming";
+  kind?: "ship" | "scout";
 }
 
 /** Record in memoria per un gruppo barrier. */
@@ -119,6 +121,7 @@ export function toGroupTaskInfo(task: TaskStateFile): GroupTaskInfo {
     groupSize: task.groupSize ?? 1,
     groupLabel: task.groupLabel,
     groupMode: task.groupMode ?? "barrier",
+    kind: task.kind,
   };
 }
 

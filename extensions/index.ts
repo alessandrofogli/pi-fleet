@@ -68,6 +68,8 @@ interface TaskStateFile {
   groupSize?: number;
   groupLabel?: string;
   groupMode?: "barrier" | "streaming";
+  kind?: "ship" | "scout";
+  reportPath?: string;
 }
 
 function stateDir(): string {
@@ -203,6 +205,7 @@ interface FleetLaunchParams {
   groupId?: string;
   groupLabel?: string;
   groupMode?: "barrier" | "streaming";
+  kind?: "ship" | "scout";
 }
 
 function spawnLauncher(taskId: string, title: string, briefPath: string, params: FleetLaunchParams): { ok: boolean; error?: string; logPath?: string } {
@@ -216,6 +219,8 @@ function spawnLauncher(taskId: string, title: string, briefPath: string, params:
   if (gid) args.push("--group-id", gid);
   if (params.groupLabel) args.push("--group-label", params.groupLabel);
   if (params.groupMode) args.push("--group-mode", params.groupMode);
+  // scout: solo report (report.md) — nessun commit/PR lato figlio
+  if (params.kind === "scout") args.push("--kind", "scout");
 
   const logPath = join(STATE_HOME, `${taskId}.log`);
   try {
@@ -471,6 +476,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       groupId: Type.Optional(Type.String({ description: "Group id for barrier digest (e.g. grp-20260828-a1b2c3). Auto-generated via batch window if omitted." })),
       groupLabel: Type.Optional(Type.String({ description: "Optional label for the group (shown in digest)" })),
       groupMode: Type.Optional(Type.String({ description: "Group mode: barrier (wait all) or streaming (per-task). Default barrier." })),
+      kind: Type.Optional(Type.Union([Type.Literal("ship"), Type.Literal("scout")], { description: "Tipo task: ship (default) o scout (solo report, nessun commit/PR)" })),
     }),
     // L3.5: se lanci N in parallelo nello stesso turno, riusa stesso groupId (auto-batch)
     // La guideline aiuta il modello a passare groupId esplicito se vuole gruppi separati.
@@ -528,6 +534,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         groupSize: 1, // placeholder — il coordinatore conta reale su disco, o si aggiorna via batch
         groupLabel: params.groupLabel,
         groupMode: effectiveGroupMode,
+        kind: params.kind ?? "ship",
       };
       writeTask(task);
 

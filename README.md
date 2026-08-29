@@ -154,12 +154,25 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 
 | Tool | What it does |
 |---|---|
-| `fleet_launch` | Launch a task (title, brief, `project` **required** — absolute path or short name if `FLEET_PROJECTS_DIR` is set; `model` optional; `timeoutMin` optional) |
+| `fleet_launch` | Launch a task (title, brief, `project` **required** — absolute path or short name if `FLEET_PROJECTS_DIR` is set; `model` optional; `timeoutMin` optional; `kind` optional: `ship` (default) o `scout` solo-indagine) |
 | `fleet_status` | List tasks, states, projects, summaries |
 | `fleet_peek <id>` | Last output of the task's pane (only for **live** tasks) |
 | `fleet_steer <id> <msg>` | Write into the child's prompt (e.g. answer a `needs_input`) |
 | `fleet_abort <id>` | Close pane/tab, release worktree, mark `aborted` |
 | `fleet_attach <id>` | Focus the herdr pane of the task |
+
+#### Task scout (solo-indagine)
+
+Con `kind: "scout"` il figlio produce **solo** un `report.md` nella root del cwd: **non committa, non fa push, non apre PR**. Nel done-marker aggiunge `reportPath` (es. `"reportPath":"report.md"`), che il launcher mergia anche nello stato del task (`~/.pi/fleet/<id>.json`). Default `ship` = comportamento attuale (commit su branch dedicato + done-marker).
+
+```
+fleet_launch(
+  title: "Scout: controlla il setup DB",
+  brief: "Analizza la config di my-app e riporta i problemi trovati.",
+  project: "my-app",
+  kind: "scout"
+)
+```
 
 ### Task states
 

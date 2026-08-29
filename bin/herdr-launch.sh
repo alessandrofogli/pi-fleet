@@ -31,6 +31,7 @@ MODEL_OVERRIDE=""
 GROUP_ID=""
 GROUP_LABEL=""
 GROUP_MODE="barrier"
+KIND="ship"
 TITLE=""
 BRIEF=""
 
@@ -45,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --group-id) GROUP_ID="$2"; shift 2 ;;
     --group-label) GROUP_LABEL="$2"; shift 2 ;;
     --group-mode) GROUP_MODE="$2"; shift 2 ;;
+    --kind) KIND="$2"; shift 2 ;;
     --debug) FM_DEBUG=1; shift ;;
     -h|--help) sed -n '1,24p' "$0"; exit 0 ;;
     *)
@@ -230,7 +232,8 @@ cat > "$STATE_JSON.tmp" <<EOF
   "groupId": $(jq -Rn --arg v "$EFFECTIVE_GROUP_ID" '$v'),
   "groupSize": 1,
   "groupLabel": $(jq -Rn --arg v "${GROUP_LABEL:-}" '$v'),
-  "groupMode": "${GROUP_MODE:-barrier}"
+  "groupMode": "${GROUP_MODE:-barrier}",
+  "kind": "${KIND:-ship}"
 }
 EOF
 mv "$STATE_JSON.tmp" "$STATE_JSON"  # atomico: niente letture a metà da parte del watcher
@@ -296,6 +299,13 @@ herdr_cli agent wait "$PANE_ID" --until idle >/dev/null 2>&1 \
 sleep 2
 
 # ------------------------------------------------------- 6. brief al figlio ----
+# Task scout (--kind scout): deliverable = report.md, niente commit/push/PR;
+# la regola extra entra nel CHILD_PROMPT solo quando KIND == scout.
+SCOUT_RULES=""
+if [[ "$KIND" == "scout" ]]; then
+  SCOUT_RULES="- SEI UN TASK SCOUT (solo report). Il tuo deliverable è un file \`report.md\` nella root del cwd con il risultato completo dell'analisi. NON committare, NON fare push, NON aprire PR. Nel done-marker aggiungi \"reportPath\":\"report.md\" (percorso relativo)."
+  log "kind: scout (solo report, nessun commit/PR)"
+fi
 CHILD_PROMPT="Sei un sub-agent fleet (task $TASK_ID). Leggi il brief in:
 $BRIEF_PATH
 
@@ -310,6 +320,7 @@ Regole:
 - REGOLA CRITICA sulla summary: NON è un verbale di attività. Deve contenere IL RISULTATO richiesto dal brief (punti, elenchi, risposte, decisioni), completo e autocontenuto. Chi la legge (il capitano) deve capire l'esito SENZA aprire altri file. Una riga tipo \"fatto / letto i file\" è INSUFFICIENTE: riporta nel dettaglio ciò che il brief ti chiede di produrre.
 - REGOLA DI FORMATTAZIONE: scrivi la summary in Markdown strutturato — intestazioni, bullet, liste numerate, tabelle dove ha senso. NIENTE muri di prosa continua: se il testo supera poche righe, spezzalo in sezioni con titoli. L'output leggibile è parte del deliverable.
 - Poi termina il turno senza chiedere nulla (questo script chiude il tab e pulisce).
+${SCOUT_RULES}
 
 Il task è: $BRIEF_CONTENT"
 
@@ -339,6 +350,7 @@ while :; do
     STATUS="$(printf '%s' "$RESULT" | jq -r '.status // "failed"')"
     SUMMARY="$(printf '%s' "$RESULT" | jq -r '.summary // ""')"
     FILES="$(printf '%s' "$RESULT" | jq -c '.changedFiles // []')"
+    REPORTPATH="$(printf '%s' "$RESULT" | jq -r '.reportPath // ""')"
     log "completato: $STATUS"
     printf '
 === RISULTATO TASK %s ===
@@ -346,8 +358,8 @@ while :; do
 === FINE ===
 ' "$TASK_ID" "$RESULT"
     # scrive stato + risultato nello state json (il capitano lo vede in fleet_status)
-    jq --arg st "$STATUS" --arg done "$(date +%s)000" --arg sum "$SUMMARY" --argjson files "$FILES" \
-      '.state=$st | .doneAt=($done|tonumber) | .summary=$sum | .changedFiles=$files' "$STATE_JSON" \
+    jq --arg st "$STATUS" --arg done "$(date +%s)000" --arg sum "$SUMMARY" --argjson files "$FILES" --arg rp "$REPORTPATH" \
+      '.state=$st | .doneAt=($done|tonumber) | .summary=$sum | .changedFiles=$files | if $rp != "" then .reportPath=$rp else . end' "$STATE_JSON" \
       > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
     rm -f "$DONE_PATH"
     break
