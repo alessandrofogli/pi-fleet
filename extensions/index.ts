@@ -2,12 +2,12 @@
  * pi-fleet · extension Pi (M2)
  *
  * Avvolge il launcher CLI (bin/herdr-launch.sh) in un'estensione Pi:
- *  - fleet_launch  : spawna un task come TAB HERDR visibile (pi figlio + worktree)
+ *  - fleet_launch  : spawna un task come PANE HERDR AFFIANCATO (split, non tab)
  *  - fleet_status  : lista task e stati
  *  - fleet_peek    : legge l'output del pane del task
  *  - fleet_steer   : scrive nella prompt del figlio (es. risposta a needs_input)
- *  - fleet_abort   : chiude tab + rilascia worktree + marca aborted
- *  - fleet_attach  : porta il focus herdr sul tab del task
+ *  - fleet_abort   : chiude pane/tab + rilascia worktree + marca aborted
+ *  - fleet_attach  : porta il focus herdr sul pane del task
  *  - watcher in-process: risveglia la chat (sendMessage triggerTurn) quando un
  *    task entra in failed/needs_input (i done sono silenziosi, come da decisioni F0)
  */
@@ -452,8 +452,8 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     name: "fleet_launch",
     label: "Fleet Launch",
     description:
-      "Spawna un sub-agent VISIBILE: crea un tab herdr con pi dentro (stesso modello della sessione main), in una worktree treehouse isolata, gli consegna il brief e libera la chat. A fine task il report arriva nella chat (successo senza interruzione; failed/needs_input risvegliano il main agent nel turno).",
-    promptSnippet: "Spawn a visible herdr tab sub-agent for a delegation task",
+      "Spawna un sub-agent VISIBILE: crea un pane herdr affiancato (split nel tab corrente) con pi dentro (stesso modello della sessione main), in una worktree treehouse isolata, gli consegna il brief e libera la chat. A fine task il report arriva nella chat (successo senza interruzione; failed/needs_input risvegliano il main agent nel turno).",
+    promptSnippet: "Spawn a visible herdr side-pane sub-agent for a delegation task",
     promptGuidelines: [
       "AUTOMATICALLY call fleet_launch for ANY non-trivial request about a project: reading/analyzing, editing, implementing, fixing, testing, refactoring. Do NOT wait for the user to type fleet_launch and do NOT ask for confirmation — delegation is the default. Handle inline ONLY questions answerable from context, fleet management, and trivial one-liners.",
       "project is REQUIRED (absolute path, ~/path, or short name if FLEET_PROJECTS_DIR is set): derive it from the user's message or the last task's project; ask one short question only if truly ambiguous. Never launch without project. Keep worktree enabled.",
@@ -475,7 +475,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     // L3.5: se lanci N in parallelo nello stesso turno, riusa stesso groupId (auto-batch)
     // La guideline aiuta il modello a passare groupId esplicito se vuole gruppi separati.
 
-    async execute(_toolCallId: string, params: FleetLaunchParams, _signal?: unknown, _onUpdate?: unknown, ctx?: { model?: { id?: string } }) {
+    async execute(_toolCallId: string, params: FleetLaunchParams, _signal?: unknown, _onUpdate?: unknown, ctx?: { model?: { id?: string; provider?: string } }) {
       const resolved = resolveProject(params.project);
       if (!resolved.ok) {
         const details: { taskId: string; state: string; logPath?: string; title: string; reason?: string } = {
@@ -532,10 +532,20 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       writeTask(task);
 
       const launchParams = { ...params, project, effectiveGroupId } as FleetLaunchParams & { effectiveGroupId?: string };
-      // Eredita il modello ATTIVO della sessione main (ctx.model.id): le env
-      // PI_MODEL/PI_DEFAULT_MODEL sono statiche all'avvio e NON seguono i
-      // cambi a metà sessione (/model, Ctrl+P). model esplicito dell'utente vince.
-      const effectiveModel = params.model ?? ctx?.model?.id;
+      // Eredita il modello ATTIVO della sessione main (ctx.model) componendo
+      // SEMPRE `provider/id` (es. "opencode-go/deepseek-v4-flash"): le env
+      // PI_MODEL/PI_DEFAULT_MODEL sono statiche all'avvio e NON seguono i cambi
+      // a metà sessione (/model, Ctrl+P). MAI il bare id: pi models risolve i
+      // bare id solo se UNICI, e modelli come "deepseek-v4-flash" collidono tra
+      // più provider → pi parte ed esce ~2.6s per ambiguità. L'override esplicito
+      // dell'utente vince; se il provider non è componibile → PI_DEFAULT_MODEL,
+      // altrimenti nessun --model (il launcher ha la sua catena di fallback).
+      let effectiveModel = params.model;
+      if (!effectiveModel && ctx?.model?.id) {
+        const provider = ctx.model.provider || process.env.PI_PROVIDER;
+        if (provider) effectiveModel = `${provider}/${ctx.model.id}`;
+      }
+      effectiveModel = effectiveModel ?? process.env.PI_DEFAULT_MODEL;
       if (effectiveModel) launchParams.model = effectiveModel;
       const res = spawnLauncher(id, params.title, briefPath, launchParams);
       const state = res.ok ? "spawning" : "failed";
@@ -699,8 +709,8 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fleet_abort",
     label: "Fleet Abort",
-    description: "Interrompe un task pi-fleet: chiude il tab herdr, rilascia la worktree, marca aborted.",
-    promptSnippet: "Abort a pi-fleet task (close tab, release worktree)",
+    description: "Interrompe un task pi-fleet: chiude il pane herdr (e il tab se dedicato), rilascia la worktree, marca aborted.",
+    promptSnippet: "Abort a pi-fleet task (close pane/tab, release worktree)",
     parameters: Type.Object({
       id: Type.String({ description: "Task id (vedi fleet_status)" }),
     }),
@@ -709,6 +719,10 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       let state = "not_found";
       if (task) {
         writeFileSync(join(STATE_HOME, `${task.id}.abort`), `${Date.now()}\n`);
+        // Pane laterale o tab dedicato: chiudi entrambi quando presenti,
+        // tollerando fallimenti (il pane split non ha tab dedicato → solo pane;
+        // task legacy con tab dedicato → pane + tab vuoto).
+        if (task.paneId) await runHerdr(["pane", "close", task.paneId], 10_000);
         if (task.tabId) await runHerdr(["tab", "close", task.tabId], 10_000);
         if (task.state === "running" || task.state === "needs_input" || task.state === "spawning") {
           task.state = "aborted";
@@ -717,7 +731,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         state = task.state;
       }
       return {
-        content: [{ type: "text", text: state === "aborted" ? `Task ${params.id} in abort (tab chiuso, worktree in rilascio).` : `Task ${params.id}: stato ${state}.` }],
+        content: [{ type: "text", text: state === "aborted" ? `Task ${params.id} in abort (pane chiuso, worktree in rilascio).` : `Task ${params.id}: stato ${state}.` }],
         details: { taskId: params.id, state },
       };
     },
@@ -727,8 +741,8 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fleet_attach",
     label: "Fleet Attach",
-    description: "Porta il focus herdr sul tab di un task pi-fleet per vederlo live (ruba il focus, usalo quando serve).",
-    promptSnippet: "Focus the herdr tab of a pi-fleet task",
+    description: "Porta il focus herdr sul pane di un task pi-fleet per vederlo live (ruba il focus, usalo quando serve).",
+    promptSnippet: "Focus the herdr pane of a pi-fleet task",
     parameters: Type.Object({
       id: Type.String({ description: "Task id (vedi fleet_status)" }),
     }),

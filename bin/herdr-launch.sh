@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # pi-fleet · launcher task (CLI per M1, chiamato dall'estensione per M2+).
 #
-# Spawna un sub-agent "visibile": crea un tab herdr reale con pi dentro,
-# gli passa un brief, e al completamento (done-marker su disco) riporta il
-# risultato, chiude il tab e rilascia la worktree.
+# Spawna un sub-agent "visibile": crea un pane herdr reale (split laterale
+# nel tab corrente del chiamante) con pi dentro, gli passa un brief, e al
+# completamento (done-marker su disco) riporta il risultato, chiude il pane e
+# rilascia la worktree.
 #
 # Uso:
 #   bin/herdr-launch.sh "<titolo>" "<brief>" [flags]
@@ -108,6 +109,8 @@ else
 fi
 
 # ------------------------------------------------------- 1. workspace herdr ----
+# La workspace serve SOLO al fallback `tab create` (step 4): il flusso primario
+# (pane split) nasce nel tab corrente del chiamante e non risolve/crea workspace.
 # Slug leggibile dal titolo (fallback quando --task-id non è passato).
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//' | cut -c1-30 | sed 's/-$//'
@@ -141,9 +144,6 @@ resolve_workspace() {
   herdr_cli workspace create --label "fleet" --cwd "$PROJECT" | jq -r '.result.workspace_id // empty'
 }
 
-WORKSPACE="$(resolve_workspace)"
-[[ -z "$WORKSPACE" ]] && { herr "impossibile risolvere la workspace herdr"; exit 1; }
-log "workspace: $WORKSPACE"
 
 # ------------------------------------------------------- 2. worktree ----
 TASK_CWD="$PROJECT"
@@ -166,18 +166,33 @@ release_worktree() {
 # Modello del figlio: il default di pi senza --model è il primo modello del
 # catalogo (qui opencode/kimi-k2.6, senza credito). Ereditiamo quindi il modello
 # della sessione main con il flag LUNGO --model (pi non ha -m; con -m fallisce).
+# REGOLA: SI passa SEMPRE il full id `provider/id` — il bare id (es.
+# "deepseek-v4-flash") collide tra più provider e `pi --model <bare>` parte ed
+# esce in ~2.6s per ambiguità. Mai `pi --model <bare>`.
 MODEL_ARGS=()
 if [[ -n "$MODEL_OVERRIDE" ]]; then
-  MODEL_ARGS=(--model "$MODEL_OVERRIDE")
-  log "modello figlio (override): $MODEL_OVERRIDE"
-elif [[ -n "${PI_PROVIDER:-}" && -n "${PI_MODEL:-}" ]]; then
-  MODEL_ARGS=(--model "${PI_PROVIDER}/${PI_MODEL}")
-  log "modello figlio: ${PI_PROVIDER}/${PI_MODEL}"
-elif [[ -n "${PI_DEFAULT_MODEL:-}" ]]; then
-  MODEL_ARGS=(--model "$PI_DEFAULT_MODEL")
-  log "modello figlio: $PI_DEFAULT_MODEL"
-else
-  log "modello figlio: nessun modello dal parent, uso default globale"
+  if [[ "$MODEL_OVERRIDE" == */* ]]; then
+    MODEL_ARGS=(--model "$MODEL_OVERRIDE")
+    log "modello figlio (override): $MODEL_OVERRIDE"
+  elif [[ -n "${PI_PROVIDER:-}" ]]; then
+    # override bare id: qualificato con PI_PROVIDER per non lanciare un bare id
+    MODEL_ARGS=(--model "${PI_PROVIDER}/${MODEL_OVERRIDE}")
+    log "modello figlio (override bare id qualificato): ${PI_PROVIDER}/${MODEL_OVERRIDE}"
+  else
+    # override non usabile: ignora con warning e prosegui con la catena env
+    log "override scorretto ignorato: '$MODEL_OVERRIDE' è un bare id (manca PI_PROVIDER) — uso la catena env"
+  fi
+fi
+if [[ ${#MODEL_ARGS[@]} -eq 0 ]]; then
+  if [[ -n "${PI_PROVIDER:-}" && -n "${PI_MODEL:-}" ]]; then
+    MODEL_ARGS=(--model "${PI_PROVIDER}/${PI_MODEL}")
+    log "modello figlio: ${PI_PROVIDER}/${PI_MODEL}"
+  elif [[ -n "${PI_DEFAULT_MODEL:-}" ]]; then
+    MODEL_ARGS=(--model "$PI_DEFAULT_MODEL")
+    log "modello figlio: $PI_DEFAULT_MODEL"
+  else
+    log "modello figlio: nessun modello dal parent, uso default globale"
+  fi
 fi
 
 # ------------------------------------------------------- 3. stato su disco ----
@@ -212,21 +227,54 @@ mv "$STATE_JSON.tmp" "$STATE_JSON"  # atomico: niente letture a metà da parte d
 log "stato: $STATE_JSON"
 if [[ -n "${GROUP_ID:-}" ]]; then log "gruppo: $GROUP_ID ($GROUP_MODE)"; fi
 
-# ------------------------------------------------------- 4. tab herdr ----
-TB_OUT="$(herdr_cli tab create --workspace "$WORKSPACE" --cwd "$TASK_CWD" --label "$TASK_ID" --no-focus)"
-TAB_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)"
-PANE_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)"
-[[ -z "$TAB_ID" || -z "$PANE_ID" ]] && { herr "tab create senza tab/pan e id: $TB_OUT"; fail_task "tab create fallito: $TB_OUT"; release_worktree; exit 1; }
-log "tab: $TAB_ID | pane: $PANE_ID"
+# ------------------------------------------------------- 4. pane herdr ----
+# Flusso primario: pane LATERALE (split) nel tab corrente del chiamante
+# (raccomandazione guida herdr: "Default to a sibling pane in the current tab").
+# Il pane nasce già nel tab del chiamante: niente risoluzione/creazione workspace,
+# e tabId resta VUOTO — non esiste un tab dedicato da chiudere, l'abort/cleanup
+# chiude SOLO il pane (mai il tab del chiamante, che contiene il capitano).
+# Fallback al vecchio `tab create` se HERDR_ENV != 1 o se lo split fallisce
+# (es. esecuzione manuale da shell fuori da herdr).
+close_tab() {
+  if [[ -n "$PANE_ID" ]]; then
+    herdr_cli pane close "$PANE_ID" >/dev/null 2>&1 && log "pane chiuso" || log "pane già chiuso"
+    PANE_ID=""
+  fi
+  if [[ -n "$TAB_ID" ]]; then
+    herdr_cli tab close "$TAB_ID" >/dev/null 2>&1 && log "tab chiuso" || log "tab già chiuso"
+    TAB_ID=""
+  fi
+}
+SPLIT_OK=""
+if [[ "${HERDR_ENV:-0}" == "1" ]]; then
+  SPLIT_OUT="$(herdr_cli pane split --current --direction right --cwd "$TASK_CWD" --no-focus)"
+  PANE_ID="$(printf '%s' "$SPLIT_OUT" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)"
+  if [[ -n "$PANE_ID" ]]; then
+    # workspace = quella del pane creato (o HERDR_WORKSPACE_ID come fallback);
+    # tabId resta vuoto: il pane vive nel tab del chiamante (HERDR_TAB_ID).
+    WORKSPACE="$(printf '%s' "$SPLIT_OUT" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)"
+    [[ -z "$WORKSPACE" ]] && WORKSPACE="${HERDR_WORKSPACE_ID:-}"
+    log "pane laterale: $PANE_ID (workspace ${WORKSPACE:-?}, tab chiamante ${HERDR_TAB_ID:-?})"
+    SPLIT_OK=1
+  else
+    log "warning: pane split fallito (${SPLIT_OUT:0:160}); fallback: tab create"
+  fi
+fi
+if [[ -z "$SPLIT_OK" ]]; then
+  if [[ -z "${WORKSPACE:-}" ]]; then
+    WORKSPACE="$(resolve_workspace)"
+    [[ -z "$WORKSPACE" ]] && { herr "impossibile risolvere la workspace herdr"; fail_task "workspace herdr non risolvibile"; release_worktree; exit 1; }
+    log "workspace: $WORKSPACE"
+  fi
+  TB_OUT="$(herdr_cli tab create --workspace "$WORKSPACE" --cwd "$TASK_CWD" --label "$TASK_ID" --no-focus)"
+  TAB_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)"
+  PANE_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)"
+  [[ -z "$TAB_ID" || -z "$PANE_ID" ]] && { herr "tab create senza tab/pane id: $TB_OUT"; fail_task "tab create fallito: $TB_OUT"; release_worktree; exit 1; }
+  log "fallback tab create: tab: $TAB_ID | pane: $PANE_ID"
+fi
 add_pane_ids
 
-close_tab() {
-  [[ -z "$TAB_ID" ]] && return 0
-  herdr_cli tab close "$TAB_ID" >/dev/null 2>&1 && log "tab chiuso" || log "tab già chiuso"
-  TAB_ID=""
-}
-
-# Cleanup su errore: SEMPRE tab prima di treehouse return (return uccide i
+# Cleanup su errore: SEMPRE pane/tab prima di treehouse return (return uccide i
 # processi nella worktree, compresa la shell del pane).
 trap 'log "interrotto: pulisco..."; close_tab; release_worktree; exit 130' INT TERM
 
