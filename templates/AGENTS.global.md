@@ -23,6 +23,7 @@ Only if the request falls into one of these cases:
 - `project` (ALWAYS required): use the absolute path (`/home/user/projects/my-app`, `~/projects/my-app`) or, if `FLEET_PROJECTS_DIR` is set, a short name resolved against it (e.g. with `FLEET_PROJECTS_DIR=~/projects`, `my-app` → `~/projects/my-app`). If truly ambiguous and not inferable, ask ONE short question. Never launch without project.
 - `timeoutMin`: default 360; lower for quick read-only tasks, raise if needed.
 - Do NOT set `worktree: false` unless explicitly justified (default: treehouse isolation).
+- **Usa SEMPRE la skill `fleet-brief`** per scrivere il brief: delega al figlio la self-recon (self-alignment, self-context, self-verification, self-delivery). Il capitano scrive solo obiettivo + vincoli + consegna e lancia subito: NON preparare mai il contesto al posto del figlio (git recon, letture docs, inventari claim) né copiare riassunti da reference obsoleti.
 
 ### When the task finishes
 - After each `fleet_launch`, **CLOSE the turn immediately**: the chat is free, do NOT poll with `fleet_status`/`fleet_peek` to monitor. The report arrives on its own in the chat (done without interruption; failed/needs_input really wake you). Use `fleet_status`/`fleet_peek` ONLY if the user asks for them or a failed report requires it.
