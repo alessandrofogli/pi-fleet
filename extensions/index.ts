@@ -8,6 +8,8 @@
  *  - fleet_steer   : scrive nella prompt del figlio (es. risposta a needs_input)
  *  - fleet_abort   : chiude pane/tab + rilascia worktree + marca aborted
  *  - fleet_attach  : porta il focus herdr sul pane del task
+ *  - fleet_learn   : registra un learning operativo datato in learnings.md (dedup 24h)
+ *  - fleet_captain_pref : get/set preferenze capitano in captain.md / captain-shared.md
  *  - watcher in-process: risveglia la chat (sendMessage triggerTurn) quando un
  *    task entra in failed/needs_input (i done sono silenziosi, come da decisioni F0)
  */
@@ -29,6 +31,15 @@ async function getFleetGroup(): Promise<typeof import("./fleet-group.js") | null
 }
 function getFleetGroupSync(): typeof import("./fleet-group.js") | null {
   return _fleetGroup;
+}
+// 5b.5 learnings/prefs — lazy import come fleet-group (fail soft)
+let _fleetLearn: typeof import("./fleet-learn.js") | null = null;
+async function getFleetLearn(): Promise<typeof import("./fleet-learn.js") | null> {
+  if (_fleetLearn) return _fleetLearn;
+  try { _fleetLearn = await import("./fleet-learn.js"); return _fleetLearn; } catch { return null; }
+}
+function getFleetLearnSync(): typeof import("./fleet-learn.js") | null {
+  return _fleetLearn;
 }
 
 const EXT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -758,6 +769,96 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     },
   });
 
+  // --- fleet_learn (5b.5) ---
+  pi.registerTool({
+    name: "fleet_learn",
+    label: "Fleet Learn",
+    description:
+      "Registra un fatto operativo (learning) datato in ~/.pi/fleet/learnings.md (runtime-globale, mai in git). Dedup per titolo nelle ultime 24h: se il titolo esiste già, sostituisce la sezione invece di duplicare. Usalo per fatti evidence-backed (da quale task/osservazione) che torneranno utili nelle sessioni future.",
+    promptSnippet: "Record an operational learning in learnings.md",
+    parameters: Type.Object({
+      title: Type.String({ description: "Titolo breve del learning" }),
+      fact: Type.String({ description: "Il fatto operativo (evidence-backed: da quale task/osservazione)" }),
+      implication: Type.Optional(Type.String({ description: "Implicazione operativa (opzionale)" })),
+    }),
+    async execute(_toolCallId, params: { title: string; fact: string; implication?: string }) {
+      const fl = await getFleetLearn();
+      const details: {
+        ok: boolean;
+        replaced: boolean;
+        file: string | null;
+      } = { ok: false, replaced: false, file: null };
+      let text: string;
+      if (!fl) {
+        text = "Modulo fleet-learn non caricato (import fallito).";
+      } else {
+        try {
+          const res = fl.addLearning(STATE_HOME, params.title, params.fact, params.implication);
+          details.ok = true;
+          details.replaced = res.replaced;
+          details.file = res.path;
+          const verb = res.replaced ? "aggiornato (dedup 24h)" : "aggiunto";
+          text = `Learning ${verb}: \"${params.title}\" → ${res.path}`;
+        } catch (e) {
+          text = `fleet_learn fallito: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+      return { content: [{ type: "text", text }], details };
+    },
+  });
+
+  // --- fleet_captain_pref (5b.5) ---
+  pi.registerTool({
+    name: "fleet_captain_pref",
+    label: "Fleet Captain Pref",
+    description:
+      "Legge o scrive una preferenza del capitano in ~/.pi/fleet/captain.md (o captain-shared.md con shared:true; runtime-globale, mai in git). Formato 'chiave: valore', ordine e commenti preservati. get → valore o null; set → conferma con la riga scritta.",
+    promptSnippet: "Get or set a captain preference",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("get"), Type.Literal("set")], { description: "get o set" }),
+      key: Type.String({ description: "Chiave della preferenza" }),
+      value: Type.Optional(Type.String({ description: "Valore (solo con action=set)" })),
+      shared: Type.Optional(Type.Boolean({ description: "true → captain-shared.md (condivisibile); default false → captain.md" })),
+    }),
+    async execute(_toolCallId, params: { action: "get" | "set"; key: string; value?: string; shared?: boolean }) {
+      const fl = await getFleetLearn();
+      const details: {
+        ok: boolean;
+        key: string;
+        shared: boolean;
+        value: string | null;
+        line: string | null;
+        file: string | null;
+      } = { ok: false, key: params.key, shared: params.shared ?? false, value: null, line: null, file: null };
+      let text: string;
+      if (!fl) {
+        text = "Modulo fleet-learn non caricato (import fallito).";
+      } else {
+        try {
+          if (params.action === "get") {
+            const res = fl.getPref(STATE_HOME, params.key, { shared: params.shared ?? false });
+            details.ok = true;
+            details.value = res;
+            text = res === null ? "null" : res;
+          } else {
+            if (params.value === undefined) {
+              text = "fleet_captain_pref set richiede 'value'.";
+            } else {
+              const res = fl.setPref(STATE_HOME, params.key, params.value, { shared: params.shared ?? false });
+              details.ok = true;
+              details.line = res.line;
+              details.file = res.path;
+              text = `Preferenza scritta: ${res.line} → ${res.path}`;
+            }
+          }
+        } catch (e) {
+          text = `fleet_captain_pref fallito: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+      return { content: [{ type: "text", text }], details };
+    },
+  });
+
   // ------------------------------------------------------ ciclo di vita -----
   // L3 watcher esterno: feature flag con fallback in-process (M2)
   // Se fleet-watch-arm.ts o bin/fleet-watch-arm.sh esistono e siamo captain,
@@ -847,5 +948,23 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     generation++;
     stopWatcher?.();
     stopWatcher = null;
+  });
+
+  // 5b.5 — preferenze capitano + learnings (hook SEPARATO dal session_start L3.5 sopra:
+  // T-006/coordinamento toccano quell'area; qui si aggiunge solo best-effort captain-only)
+  pi.on("session_start", () => {
+    if (!IS_CAPTAIN) return;
+    void (async () => {
+      try {
+        const fl = await getFleetLearn();
+        if (!fl) return;
+        fl.ensureFiles(STATE_HOME);
+        const prefs = fl.readCaptain(STATE_HOME);
+        const nPrefs = fl.countPrefs(STATE_HOME);
+        const nLearnings = fl.countLearnings(STATE_HOME);
+        console.log(`[pi-fleet] captain prefs: ${nPrefs} chiavi, ${nLearnings} learnings`);
+        if (prefs.trim()) console.log(`[pi-fleet] captain.md bootstrap:\n${prefs.trimEnd()}`);
+      } catch { /* best-effort */ }
+    })();
   });
 }
