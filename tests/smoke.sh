@@ -189,4 +189,171 @@ fi
 # ---------------------------------------------------------------- [6/6] esito
 log "[6/6] tutti i check verdi"
 log "ESITO: OK — catena launcher → figlio → done-marker → stato verificata (task $TASK_ID)"
+
+# ══════════════════════════════════════════════════════════ gate T-011 ════════════════
+# Scenario gate meccanico (T-011) su repo scratch dedicati con gate.yaml e
+# autoPr:false (NO remote → niente PR reale). Il launcher riceve --gate direttamente
+# (stesso flag che l'estensione passa quando posture=no-mistakes E gate.yaml esiste).
+#
+#   Case A — test rotto  → task failed, gate rosso, report presente, nessuna PR
+#   Case B — test verde  → task done, gate verde, nessuna PR (autoPr false)
+#
+# La PR automatica vera (remote GitHub + gh-axi) è FUORI da questo smoke automatico:
+# procedura manuale documentata nel summary del task e nel README.
+
+GATE_RUN="$REPO_ROOT/bin/gate-run.sh"
+[[ -f "$GATE_RUN" ]] || die "gate-run.sh non trovato: $GATE_RUN"
+
+log "[7/9] gate (T-011): setup scratch gate.yaml + brief case A/B"
+TSG="$(date +%s)"
+SCRATCH_A="/tmp/fleet-gate-a-$TSG"
+SCRATCH_B="/tmp/fleet-gate-b-$TSG"
+STATE_A="/tmp/fleet-gate-state-a-$TSG"
+STATE_B="/tmp/fleet-gate-state-b-$TSG"
+BRIEF_A="$STATE_A/brief.md"
+BRIEF_B="$STATE_B/brief.md"
+TASK_A="gate-a-$TSG"
+TASK_B="gate-b-$TSG"
+mkdir -p "$STATE_A" "$STATE_B"   # serve prima dei brief (heredoc sopra); gli scratch li crea setup_gate_scratch
+
+# cleanup esteso: anche gli scratch/state dei gate — unico EXIT trap che
+# preserva il cleanup base originale (in bash l'ultimo trap EXIT sostituisce i precedenti)
+_cleanup_gate() {
+  [[ "$KEEP" == "1" ]] && return 0
+  rm -rf "$SCRATCH_A" "$SCRATCH_B" "$STATE_A" "$STATE_B"
+}
+trap 'cleanup; _cleanup_gate' EXIT
+
+setup_gate_scratch() {
+  local dir="$1" state="$2"
+  mkdir -p "$dir" "$state"
+  # gate.yaml scritto FUORI della subshell (heredoc + &&-chain in ( ) non è
+  # parsabile da bash): content = gate con autoPr false (no remote → niente PR)
+  cat > "$dir/gate.yaml" <<'YEOF'
+posture: no-mistakes
+autoPr: false
+loop:
+  maxRounds: 3
+checks:
+  - { name: gate-test, cmd: bash gate-test.sh, kind: hard }
+YEOF
+  ( cd "$dir" \
+      && git init -q \
+      && git config user.name "fleet-smoke" \
+      && git config user.email "fleet-smoke@localhost" \
+      && printf '# fleet gate scratch\n' > README.md \
+      && git add README.md gate.yaml \
+      && git commit -qm "init gate smoke" ) \
+    || die "creazione repo scratch gate fallita: $dir"
+}
+
+# ---- brief dei due case ----
+cat > "$BRIEF_A" <<'EOF'
+# T-011 smoke — gate ROSSO (case A)
+
+Progetto scratch con gate.yaml: il check `gate-test` esegue `bash gate-test.sh` (hard).
+
+1. Crea nella root del cwd il file `gate-test.sh` con questo contenuto ESATTO
+   (test volutamente ROTTO — termina con exit 1):
+
+       #!/usr/bin/env bash
+       echo "gate rosso (voluto)"; exit 1
+
+2. NON ripararlo: è il caso di verifica del gate ROSSO. Se il gate ti chiede
+   di fixare, NON fixare (istruzione esplicita del brief).
+
+3. Esegui il gate (sezione GATE della tua prompt) e poi scrivi il done-marker
+   nel file DONE_PATH con status "failed" e nella summary il contenuto
+   essenziale del report del gate (nomi checks + exit code + overall).
+
+4. NON committare, NON fare push, NON aprire PR.
+EOF
+cat > "$BRIEF_B" <<'EOF'
+# T-011 smoke — gate VERDE (case B)
+
+Progetto scratch con gate.yaml: il check `gate-test` esegue `bash gate-test.sh` (hard).
+
+1. Crea nella root del cwd il file `gate-test.sh` che termina con exit 0:
+
+       #!/usr/bin/env bash
+       echo "gate verde"; exit 0
+
+2. Esegui il gate (sezione GATE della tua prompt): deve risultare VERDE al
+   primo round (nessun fix necessario).
+
+3. A verde scrivi il done-marker nel file DONE_PATH con status "done" e nel
+   JSON il campo gate:
+       "gate":{"passed":true,"rounds":1,"reportPath":"gate/report.json"}
+
+4. NON committare, NON fare push, NON aprire PR.
+EOF
+log "  scratch A: $SCRATCH_A · scratch B: $SCRATCH_B (state isolati in /tmp)"
+
+# ------------------------------------------------------------- [8/9] gate case A
+log "[8/9] gate case A (test rotto → atteso failed, gate rosso, nessuna PR)"
+setup_gate_scratch "$SCRATCH_A" "$STATE_A"
+export FLEET_STATE_HOME="$STATE_A"
+run_with_timeout "$LAUNCH_TIMEOUT_S" \
+  "$LAUNCHER" "gate-a-$TSG" "@$BRIEF_A" \
+  --project "$SCRATCH_A" --no-worktree --task-id "$TASK_A" --timeout-min 8 \
+  --gate --auto-pr false \
+  "${MODEL_FLAG[@]+"${MODEL_FLAG[@]}"}" \
+  >/dev/null 2>&1
+RC_A=$?
+log "  case A: launcher exit=$RC_A"
+[[ $RC_A -eq 0 ]] || die "case A: launcher fallito (exit $RC_A)"
+SA="$STATE_A/$TASK_A.json"
+FAILS=0
+[[ -f "$SA" ]] || die "case A: state json mancante: $SA"
+ST_A="$(jq -r '.state // ""' "$SA")"
+GP_A="$(jq -r '.gate.passed // false' "$SA")"
+PR_A="$(jq -r '.prUrl // ""' "$SA")"
+log "  case A: state=$ST_A gate.passed=$GP_A prUrl='$PR_A'"
+[[ "$ST_A" == "failed" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: state='$ST_A', atteso failed"; }
+[[ "$GP_A" == "false" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: gate.passed='$GP_A', atteso false"; }
+[[ -z "$PR_A" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: prUrl presente='$PR_A', atteso vuoto (autoPr false)"; }
+if [[ -f "$SCRATCH_A/gate/report.json" ]]; then
+  REP_A="$(jq -r '.overall // ""' "$SCRATCH_A/gate/report.json")"
+  log "  case A: report presente, overall=$REP_A"
+  [[ "$REP_A" == "red" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: overall report='$REP_A', atteso red"; }
+else
+  FAILS=$((FAILS + 1)); log "  FAIL: report gate mancante: $SCRATCH_A/gate/report.json"
+fi
+[[ $FAILS -eq 0 ]] || die "case A: $FAILS check non passati"
+log "  case A OK: failed + gate rosso + report presente + nessuna PR"
+
+# ------------------------------------------------------------- [9/9] gate case B
+log "[9/9] gate case B (test verde → atteso done, gate verde, nessuna PR)"
+setup_gate_scratch "$SCRATCH_B" "$STATE_B"
+export FLEET_STATE_HOME="$STATE_B"
+run_with_timeout "$LAUNCH_TIMEOUT_S" \
+  "$LAUNCHER" "gate-b-$TSG" "@$BRIEF_B" \
+  --project "$SCRATCH_B" --no-worktree --task-id "$TASK_B" --timeout-min 8 \
+  --gate --auto-pr false \
+  "${MODEL_FLAG[@]+"${MODEL_FLAG[@]}"}" \
+  >/dev/null 2>&1
+RC_B=$?
+log "  case B: launcher exit=$RC_B"
+[[ $RC_B -eq 0 ]] || die "case B: launcher fallito (exit $RC_B)"
+SB="$STATE_B/$TASK_B.json"
+FAILS=0
+[[ -f "$SB" ]] || die "case B: state json mancante: $SB"
+ST_B="$(jq -r '.state // ""' "$SB")"
+GP_B="$(jq -r '.gate.passed // false' "$SB")"
+PR_B="$(jq -r '.prUrl // ""' "$SB")"
+log "  case B: state=$ST_B gate.passed=$GP_B prUrl='$PR_B'"
+[[ "$ST_B" == "done" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: state='$ST_B', atteso done"; }
+[[ "$GP_B" == "true" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: gate.passed='$GP_B', atteso true"; }
+[[ -z "$PR_B" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: prUrl presente='$PR_B', atteso vuoto (autoPr false)"; }
+if [[ -f "$SCRATCH_B/gate/report.json" ]]; then
+  REP_B="$(jq -r '.overall // ""' "$SCRATCH_B/gate/report.json")"
+  log "  case B: report presente, overall=$REP_B"
+  [[ "$REP_B" == "green" ]] || { FAILS=$((FAILS + 1)); log "  FAIL: overall report='$REP_B', atteso green"; }
+else
+  FAILS=$((FAILS + 1)); log "  FAIL: report gate mancante: $SCRATCH_B/gate/report.json"
+fi
+[[ $FAILS -eq 0 ]] || die "case B: $FAILS check non passati"
+log "  case B OK: done + gate verde + report presente + nessuna PR"
+
+log "ESITO GATE (T-011): OK — case A (rosso→failed, no PR) e case B (verde→done, no PR)"
 exit 0

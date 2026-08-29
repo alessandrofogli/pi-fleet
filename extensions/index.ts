@@ -122,6 +122,9 @@ interface TaskStateFile {
   reportPath?: string;
   deliveryPosture?: string;
   groupFailPolicy?: "waitAll" | "immediate";
+  // T-011 gate meccanico: esito della verifica anti-frode del launcher
+  gate?: { passed: boolean; rounds?: number; reportPath?: string };
+  prUrl?: string;
 }
 
 function stateDir(): string {
@@ -260,6 +263,9 @@ interface FleetLaunchParams {
   kind?: "ship" | "scout";
   deliveryPosture?: string;
   groupFailPolicy?: "waitAll" | "immediate";
+  // T-011 gate: attivo solo quando posture no-mistakes E gate.yaml nel progetto
+  gate?: boolean;
+  autoPr?: boolean;
 }
 
 function spawnLauncher(taskId: string, title: string, briefPath: string, params: FleetLaunchParams): { ok: boolean; error?: string; logPath?: string } {
@@ -278,6 +284,9 @@ function spawnLauncher(taskId: string, title: string, briefPath: string, params:
   // T-003: posture di consegna del task (default no-mistakes, già risolta in execute)
   if (params.deliveryPosture) args.push("--delivery-posture", params.deliveryPosture);
   if (params.groupFailPolicy) args.push("--group-fail-policy", params.groupFailPolicy);
+  // T-011: gate meccanico (solo no-mistakes + gate.yaml, risolto in execute) + autoPr da gate.yaml
+  if (params.gate) args.push("--gate");
+  if (params.gate && params.autoPr !== undefined) args.push("--auto-pr", params.autoPr ? "true" : "false");
 
   const logPath = join(STATE_HOME, `${taskId}.log`);
   try {
@@ -322,7 +331,15 @@ function formatTaskLine(t: TaskStateFile, groupCounts?: Map<string, { done: numb
       if (n > 0) inbox = ` (inbox: ${n})`;
     }
   } catch { /* fail soft */ }
-  return `- **${t.title ?? t.id}** [${t.state}]${inbox}${grp}${dur}${sum} — ${t.project ?? ""}`;
+  // T-011: esito gate (verifica anti-frode del launcher) e PR automatica
+  let gateS = "";
+  if (t.gate) gateS = t.gate.passed ? " (gate:✓)" : " (gate:✗)";
+  let prS = "";
+  if (t.prUrl && t.state === "done") {
+    const prNum = t.prUrl.match(/\/pull\/(\d+)/)?.[1];
+    prS = prNum ? ` (pr:#${prNum})` : ` (pr:${t.prUrl.length > 60 ? t.prUrl.slice(0, 57) + "…" : t.prUrl})`;
+  }
+  return `- **${t.title ?? t.id}** [${t.state}]${inbox}${grp}${gateS}${prS}${dur}${sum} — ${t.project ?? ""}`;
 }
 
 function sendGroupDigest(pi: ExtensionAPI, groupId: string, results: GroupTaskInfo[]): void {
@@ -705,6 +722,19 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
 
       const launchParams = { ...params, project, effectiveGroupId } as FleetLaunchParams & { effectiveGroupId?: string };
       launchParams.deliveryPosture = posture;
+      // T-011 gate meccanico: attivo SOLO quando posture no-mistakes E il progetto
+      // ha gate.yaml. Retrocompatibilità: posture diverse e progetti senza gate.yaml
+      // non cambiano nulla. autoPr dal gate.yaml (default false — MAI aprire PR senza config).
+      const gateYamlPath = join(project, "gate.yaml");
+      if (posture === "no-mistakes" && existsSync(gateYamlPath)) {
+        launchParams.gate = true;
+        launchParams.autoPr = false;
+        try {
+          const raw = readFileSync(gateYamlPath, "utf8");
+          const m = raw.match(/^\s*autoPr\s*:\s*(true|false)\s*$/m);
+          if (m?.[1] === "true") launchParams.autoPr = true;
+        } catch { /* gate.yaml illeggibile → autoPr false (fail-open sul gate) */ }
+      }
       // Eredita il modello ATTIVO della sessione main (ctx.model) componendo
       // SEMPRE `provider/id` (es. "opencode-go/deepseek-v4-flash"): le env
       // PI_MODEL/PI_DEFAULT_MODEL sono statiche all'avvio e NON seguono i cambi

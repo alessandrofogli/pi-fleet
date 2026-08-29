@@ -37,6 +37,23 @@ if [[ -n "$missing" ]]; then
   exit 1
 fi
 
+# T-011: gh-axi per la PR automatica del gate — OPZIONALE, auto-install se assente
+if command -v gh-axi >/dev/null 2>&1; then
+  echo "   ✓ gh-axi: $(command -v gh-axi) (PR automatica del gate T-011)"
+else
+  echo "   … gh-axi: assente — provo a installarlo (npm i -g gh-axi)"
+  if command -v npm >/dev/null 2>&1 && npm i -g gh-axi >/dev/null 2>&1; then
+    echo "   ✓ gh-axi installato: $(command -v gh-axi)"
+  else
+    warn "gh-axi non installato: il gate di consegna (T-011) resta attivo ma la PR automatica (autoPr: true) non è possibile. Installa con: npm i -g gh-axi"
+  fi
+fi
+# T-011: il gate e l'engine no-mistakes sono OPZIONALI — solo progetti con gate.yaml
+# e posture no-mistakes; i comandi no-mistakes (impacted-checks/resolve-check) nei
+# checks sono facoltativi.
+echo "   ℹ  gate di consegna (T-011): OPZIONALE — attivo solo per progetti con gate.yaml e"
+echo "      posture no-mistakes; l'engine no-mistakes nei checks (impacted-checks/resolve-check) è opzionale."
+
 # herdr attivo?
 if ! herdr workspace list >/dev/null 2>&1; then
   warn "herdr non raggiungibile (socket?). Avvialo prima; il setup prosegue comunque."
@@ -112,6 +129,10 @@ echo "  3. Check the default model in ~/.pi/agent/settings.json"
 echo "     if needed (children INHERIT the active model at launch)."
 echo "  4. RESTART pi (extension loads at startup)."
 echo "  5. Try:  look at my-project and give me a README summary"
+echo
+echo "  Gate di consegna (T-011, opzionale):"
+echo "    - Per attivarlo in un progetto: crea gate.yaml nella root (vedi README.md §Gate)."
+echo "    - La PR automatica (autoPr: true) richiede gh-axi e un remote GitHub sul repo."
 echo
 echo "  Log di debug: ~/.pi/fleet/<task-id>.log   · stato: ~/.pi/fleet/"
 echo "──────────────────────────────────────────────────────────────────"

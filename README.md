@@ -160,6 +160,41 @@ In `postures.json` the map is `{ "<projectPath>": "no-mistakes"|"direct-PR"|"loc
 
 ---
 
+## Configuration — gate di consegna (T-011, opzionale)
+
+Su progetti con posture `no-mistakes`, il task può passare da un **gate meccanico deterministico** prima della consegna: task implementa → gate (`bin/gate-run.sh`, solo exit code di processi, nessun AI nel gate) → se rosso **loop di self-fix del figlio** (fixa SOLO ciò che il report segnala, max `loop.maxRounds`) → **verifica finale anti-frode nel launcher** → **PR automatica SOLO se configurata**. Il merge non è MAI automatico (autorità = capitano).
+
+### Contratto `gate.yaml` (tracked nella root del repo gated)
+
+```yaml
+posture: no-mistakes        # allineata a postures.json (default no-mistakes)
+autoPr: true                # PR automatica a gate verde — default false
+loop:
+  maxRounds: 5              # tetto round self-fix del figlio (default 5)
+checks:
+  - { name: typecheck, cmd: npx tsc --noEmit,            kind: hard }
+  - { name: test,      cmd: npm test,                    kind: hard }
+  - { name: impact,    cmd: no-mistakes impacted-checks, kind: hard }   # opzionale (engine no-mistakes)
+  - { name: resolve,   cmd: no-mistakes resolve-check,   kind: advisory }
+```
+
+- `kind: hard` → obbligatorio exit 0 per il verde; `advisory` → va nel report, non blocca.
+- **Config assente** (o posture ≠ no-mistakes) → comportamento attuale invariato: niente gate. Se il gate è attivo ma `gate.yaml` manca nel fallback: checks default `typecheck` (se tsconfig), `test` (se script test), `git diff --check`, `git status` pulito (tutti hard) — MAI bloccante su config assente (`autoPr` false).
+
+### Come funziona (flusso)
+
+1. L'estensione (`fleet_launch`) rileva `posture == no-mistakes` **E** `gate.yaml` nel progetto → passa `--gate [--auto-pr true|false]` al launcher.
+2. Il figlio riceve la sezione **GATE** nel prompt: dopo l'implementazione esegue `bash <pi-fleet>/bin/gate-run.sh --report gate/report.json`; rosso → fixa solo ciò che il report segnala e ri-esegue (max `maxRounds`); **MAI done-marker con gate rosso**; a verde mette `gate:{passed,rounds,reportPath}` nel done-marker.
+3. Il launcher, dopo il done-marker e PRIMA di finalizzare, **riesegue lui stesso** il gate sulla worktree allo stato finale (anti-frode: il figlio non può barare):
+   - rosso/errore → task `failed` con il report, tab chiuso, **nessuna PR**;
+   - verde + `autoPr:true` → `gh-axi pr create --head <branch> --base main --title "<titolo>" --body-file <report>` (retry leggeri 2×3s su busy; gh-axi assente → fallback `npx -y gh-axi`); `prUrl` + `gate` mergiati nello stato;
+   - verde + `autoPr:false` → `done` senza PR.
+4. `fleet_status` mostra il suffisso `(gate:✓/✗)` e `(pr:#N)` quando presenti.
+
+`gh-axi` (0.1.34+) è installato globalmente (vedi `bin/setup-fleet.sh`, che lo assicura). Serve un **remote GitHub** sul repo: senza remote la PR non può essere creata (il case PR vero è fuori dallo smoke automatico — vedi *Testing*).
+
+---
+
 ## Usage
 
 ### Automatic delegation (just ask)
@@ -340,6 +375,15 @@ Prerequisiti:
 Cosa fa: crea un repo scratch in `/tmp/fleet-smoke-*` (git init + commit iniziale), isola lo stato in `/tmp/fleet-smoke-state-*` via `FLEET_STATE_HOME` (la flotta reale in `~/.pi/fleet` **non viene toccata**), lancia `bin/herdr-launch.sh` con `--no-worktree` su un task figlio minimo e verifica: state json con `state == "done"` e `summary` non vuota, `esito.txt` contenente `SMOKE_OK` nel repo scratch, done-marker consumato dal launcher.
 
 Exit codes: `0` verde · `1` fallito · `2` prerequisiti mancanti.
+
+Dalla stessa run, lo smoke copre anche **due scenari gate (T-011)** su repo scratch dedicati (`/tmp/fleet-gate-{a,b}-*`, `gate.yaml` con `autoPr:false`, nessun remote):
+
+| Caso | Setup | Esito atteso |
+|---|---|---|
+| **A** | `gate-test.sh` rotto (exit 1), brief che proibisce di fixare | task `failed`, `gate.passed=false`, `gate/report.json` con `overall: red`, **nessuna PR** |
+| **B** | `gate-test.sh` verde (exit 0) | task `done`, `gate.passed=true`, report `overall: green`, **nessuna PR** (`autoPr` false) |
+
+**PR automatica vera** (remote GitHub reale + `gh-axi pr create`): fuori dallo smoke automatico — procedura manuale/run separato: crea un repo con remote, `gate.yaml` con `autoPr: true`, lancia un task no-mistakes e verifica in `fleet_status` il suffisso `(pr:#N)` e lo stato con `prUrl`; il merge resta manuale (autorità = capitano).
 
 Environment opzionali:
 

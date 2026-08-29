@@ -18,10 +18,16 @@
 #   --model <prov/mod>   override modello figlio (default: eredita dal parent)
 #   --session <name>     sessione herdr (default: HERDR_SESSION | "default")
 #   --delivery-posture <p>  posture di consegna del task (no-mistakes|direct-PR|local-only|yolo, default: no-mistakes)
+#   --group-fail-policy <p>  waitAll (default) | immediate: failed in gruppo sveglia subito il capitano
+#   --gate              gate meccanico attivo (T-011): il launcher riesegue da sé il gate anti-frode
+#                       a fine task; il figlio riceve la sezione GATE nel prompt (solo posture no-mistakes)
+#   --auto-pr <bool>    PR automatica a gate verde (true|false, da gate.yaml). Merge MAI automatico.
 #   --debug              stampa output raw dei comandi herdr
 set -u
 
 # ---------------------------------------------------------------- config ----
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GATE_RUN="$SCRIPT_DIR/gate-run.sh"   # risolto rispetto al proprio dir: niente path assoluti hardcoded
 FM_DEBUG=0
 SESSION="${HERDR_SESSION:-default}"
 PROJECT="$(pwd)"
@@ -35,6 +41,8 @@ GROUP_MODE="barrier"
 KIND="ship"
 DELIVERY_POSTURE="no-mistakes"
 GROUP_FAIL_POLICY="waitAll"
+GATE_ACTIVE=0
+AUTO_PR="false"
 TITLE=""
 BRIEF=""
 
@@ -52,6 +60,8 @@ while [[ $# -gt 0 ]]; do
     --kind) KIND="$2"; shift 2 ;;
     --delivery-posture) DELIVERY_POSTURE="$2"; shift 2 ;;
     --group-fail-policy) GROUP_FAIL_POLICY="$2"; shift 2 ;;
+    --gate) GATE_ACTIVE=1; shift ;;
+    --auto-pr) AUTO_PR="$2"; shift 2 ;;
     --debug) FM_DEBUG=1; shift ;;
     -h|--help) sed -n '1,24p' "$0"; exit 0 ;;
     *)
@@ -313,6 +323,23 @@ if [[ "$KIND" == "scout" ]]; then
   SCOUT_RULES="- SEI UN TASK SCOUT (solo report). Il tuo deliverable è un file \`report.md\` nella root del cwd con il risultato completo dell'analisi. NON committare, NON fare push, NON aprire PR. Nel done-marker aggiungi \"reportPath\":\"report.md\" (percorso relativo)."
   log "kind: scout (solo report, nessun commit/PR)"
 fi
+# T-011 gate meccanico: sezione GATE condizionale (solo quando --gate, cioè
+# posture no-mistakes E progetto con gate.yaml). Il figlio posssiede il loop
+# self-fix (modello firstmate: il worker possiede run/fix). L'anti-frode è nel
+# launcher (sezione 7.5): il figlio NON può barare sul verde finale.
+GATEROUNDS_MAX="5"
+if [[ "$GATE_ACTIVE" == "1" ]]; then
+  GATE_YAML_CFG="$TASK_CWD/gate.yaml"
+  [[ -f "$GATE_YAML_CFG" ]] || GATE_YAML_CFG="$PROJECT/gate.yaml"
+  if [[ -f "$GATE_YAML_CFG" ]]; then
+    rounds="$(sed -n 's/^[[:space:]]*maxRounds:[[:space:]]*\([0-9]*\).*/\1/p' "$GATE_YAML_CFG" | head -1)"
+    [[ -n "$rounds" ]] && GATEROUNDS_MAX="$rounds"
+  fi
+  GATE_RULES="GATE: il progetto ha un gate deterministico ($GATE_RUN). Dopo l'implementazione: 1) esegui il gate eseguendo \`bash \"$GATE_RUN\" --report gate/report.json\` nella root del cwd (crea la dir gate/ se serve); 2) se rosso, leggi il report per-step e fixa SOLO ciò che il report segnala (niente scope creep), poi ri-esegui il gate (max ${GATEROUNDS_MAX} round); 3) MAI scrivere il done-marker con gate rosso — se i round finiscono su rosso scrivi il done-marker con status \"failed\" e la summary con dentro il contenuto del report; 4) a verde metti nel done-marker \`gate:{passed:true,rounds:N,reportPath:\"gate/report.json\"}\`; NON aprire tu PR/merge: se il progetto lo configura, lo fa il sistema."
+  log "gate: attivo (maxRounds $GATEROUNDS_MAX)"
+else
+  GATE_RULES=""
+fi
 CHILD_PROMPT="Sei un sub-agent fleet (task $TASK_ID). Leggi il brief in:
 $BRIEF_PATH
 
@@ -329,6 +356,7 @@ Regole:
 - REGOLA DI FORMATTAZIONE: scrivi la summary in Markdown strutturato — intestazioni, bullet, liste numerate, tabelle dove ha senso. NIENTE muri di prosa continua: se il testo supera poche righe, spezzalo in sezioni con titoli. L'output leggibile è parte del deliverable.
 - Poi termina il turno senza chiedere nulla (questo script chiude il tab e pulisce).
 ${SCOUT_RULES}
+${GATE_RULES}
 
 DELIVERY POSTURE: $DELIVERY_POSTURE
 Significato:
@@ -368,12 +396,13 @@ while :; do
     # con summary raw, così lo stato non resta mai bloccato su 'running'.
     if ! printf '%s' "$RESULT" | jq -e . >/dev/null 2>&1; then
       log "done.json non-JSON valido (probabili newline letterali nella summary): fallback best-effort"
-      STATUS="done"; SUMMARY="$RESULT"; FILES="[]"; REPORTPATH=""
+      STATUS="done"; SUMMARY="$RESULT"; FILES="[]"; REPORTPATH=""; CHILD_GATE_ROUNDS=0
     else
       STATUS="$(printf '%s' "$RESULT" | jq -r '.status // "failed"')"
       SUMMARY="$(printf '%s' "$RESULT" | jq -r '.summary // ""')"
       FILES="$(printf '%s' "$RESULT" | jq -c '.changedFiles // []')"
       REPORTPATH="$(printf '%s' "$RESULT" | jq -r '.reportPath // ""')"
+      CHILD_GATE_ROUNDS="$(printf '%s' "$RESULT" | jq -r '.gate.rounds // 0' 2>/dev/null || echo 0)"
     fi
     log "completato: $STATUS"
     printf '
@@ -428,6 +457,90 @@ while :; do
   fi
   sleep 2
 done
+
+# ------------------------------------------- 7.5 gate anti-frode (T-011) ----
+# Il launcher riesegue LUI STESSO il gate sulla worktree allo stato finale
+# (HEAD = commit finale del figlio — dopo il done-marker, prima di finalizzare).
+# Anti-frode: il figlio non può barare sul verde. Merge MAI automatico (F0 #6).
+# Casistiche:
+#   rosso/errore            → task failed con il report; tab chiuso; NIENTE PR.
+#   verde + autoPr:true     → gh-axi pr create; prUrl + gate nello state json.
+#   verde + autoPr:false    → done senza PR (gate nello state json).
+gh_axi() {
+  if command -v gh-axi >/dev/null 2>&1; then
+    gh-axi "$@"
+  else
+    log "gh-axi non in PATH → fallback npx -y gh-axi (documentato)"
+    npx -y gh-axi "$@"
+  fi
+}
+run_pr_create() {
+  local head="$1" body="$2" title="$3" out rc pr
+  local try
+  for ((try = 1; try <= 3; try++)); do   # retry leggeri (2×3s) su busy
+    out="$(cd "$PROJECT" && gh_axi pr create --head "$head" --base main --title "$title" --body-file "$body" 2>&1)"
+    rc=$?
+    if [[ $rc -eq 0 ]]; then
+      pr="$(printf '%s' "$out" | jq -r '.url // .html_url // empty' 2>/dev/null)"
+      [[ -z "$pr" ]] && pr="$(printf '%s' "$out" | tr -d '\n' | grep -oE 'https?://[^ )"]+' | head -1)"
+      [[ -z "$pr" ]] && pr="$(printf '%s' "$out" | head -1)"   # fallback: output grezzo
+      echo "$pr"; return 0
+    fi
+    log "gh-axi pr create: tentativo $try/3 fallito (rc=$rc): ${out:0:140}"
+    sleep 3
+  done
+  echo ""
+  return 1
+}
+
+if [[ "$GATE_ACTIVE" == "1" ]]; then
+  GATE_REPORT_PATH="gate/report.json"
+  log "gate: rieseguo il gate da me (anti-frode) su $TASK_CWD ..."
+  ( cd "$TASK_CWD" && bash "$GATE_RUN" --report "$GATE_REPORT_PATH" >/dev/null 2>&1 )
+  GATE_RC=$?
+  GATE_OVERALL="red"
+  if [[ -f "$TASK_CWD/$GATE_REPORT_PATH" ]]; then
+    GATE_OVERALL="$(jq -r '.overall // "red"' "$TASK_CWD/$GATE_REPORT_PATH" 2>/dev/null || echo red)"
+  else
+    herr "gate: report mancante (${TASK_CWD}/${GATE_REPORT_PATH}) — tratto come rosso"
+  fi
+  [[ "$GATE_RC" -eq 0 && "$GATE_OVERALL" == "green" ]] && GATE_PASSED=1 || GATE_PASSED=0
+  GATE_ROUNDS="${CHILD_GATE_ROUNDS:-0}"
+  GATE_OBJ="$(jq -nc --argjson p "$GATE_PASSED" --argjson r "$GATE_ROUNDS" --arg rp "$GATE_REPORT_PATH" \
+    '{passed:($p==1), rounds:$r, reportPath:$rp}')"
+  if [[ "$GATE_PASSED" -eq 1 ]]; then
+    log "gate verde (rc=$GATE_RC, overall=$GATE_OVERALL)"
+    if [[ "$AUTO_PR" == "true" ]]; then
+      PR_HEAD="$(git -C "$TASK_CWD" symbolic-ref --short HEAD 2>/dev/null || git -C "$TASK_CWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+      log "gate verde + autoPr:true → creo PR (head=$PR_HEAD)"
+      PR_URL="$(run_pr_create "$PR_HEAD" "$TASK_CWD/$GATE_REPORT_PATH" "$TITLE")"
+      if [[ -n "$PR_URL" ]]; then
+        jq --argjson gate "$GATE_OBJ" --arg pr "$PR_URL" \
+          '.gate=$gate | .prUrl=$pr' "$STATE_JSON" \
+          > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
+        log "PR creata: $PR_URL (merge MAI automatico — autorità = capitano)"
+      else
+        herr "gate verde ma creazione PR fallita (gh-axi): task failed, MAI PR a metà"
+        jq --arg done "$(date +%s)000" --argjson gate "$GATE_OBJ" \
+          --arg sum "Gate verde ma creazione PR automatica fallita (gh-axi non ha risposto). Vedi report: $GATE_REPORT_PATH." \
+          '.state="failed" | .doneAt=($done|tonumber) | .gate=$gate | .summary=$sum' "$STATE_JSON" \
+          > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
+      fi
+    else
+      jq --argjson gate "$GATE_OBJ" '.gate=$gate' "$STATE_JSON" \
+        > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
+      log "gate verde, autoPr=false → done senza PR"
+    fi
+  else
+    herr "gate rosso all'anti-frode (rc=$GATE_RC, overall=$GATE_OVERALL): task failed, NIENTE PR"
+    jq --arg done "$(date +%s)000" --argjson gate "$GATE_OBJ" \
+      --arg sum "Gate (anti-frode launcher) ROSSO dopo il done-marker del figlio: rc=$GATE_RC overall=$GATE_OVERALL. Report: $GATE_REPORT_PATH. PR NON creata." \
+      '.state="failed" | .doneAt=($done|tonumber) | .gate=$gate | .summary=$sum' "$STATE_JSON" \
+      > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
+  fi
+else
+  log "gate non attivo (no --gate): nessuna verifica finale"
+fi
 
 # ------------------------------------------------------- 8. cleanup ----
 close_tab
