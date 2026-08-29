@@ -177,6 +177,34 @@ Dettaglio: `groupId`/`groupSize`/`groupLabel`/`groupMode` in `{id}.json`; stato 
 
 ---
 
+## Testing
+
+Smoke test end-to-end della catena base **launcher → pi figlio nel pane herdr → done-marker → stato su disco**:
+
+```bash
+bash tests/smoke.sh
+```
+
+Prerequisiti:
+- **herdr attivo** con la sessione `default` (o imposta `HERDR_SESSION` per un'altra sessione) — se il daemon non risponde lo script esce con codice `2` (skipped documentato, mai falso verde);
+- `jq` in PATH (`brew install jq`);
+- `pi` raggiungibile come agente herdr (il figlio gira in un pane reale).
+
+Cosa fa: crea un repo scratch in `/tmp/fleet-smoke-*` (git init + commit iniziale), isola lo stato in `/tmp/fleet-smoke-state-*` via `FLEET_STATE_HOME` (la flotta reale in `~/.pi/fleet` **non viene toccata**), lancia `bin/herdr-launch.sh` con `--no-worktree` su un task figlio minimo e verifica: state json con `state == "done"` e `summary` non vuota, `esito.txt` contenente `SMOKE_OK` nel repo scratch, done-marker consumato dal launcher.
+
+Exit codes: `0` verde · `1` fallito · `2` prerequisiti mancanti.
+
+Environment opzionali:
+
+| Variabile | Effetto |
+|---|---|
+| `PI_FLEET_SMOKE_MODEL` | override del modello del figlio, full id `provider/id` (default: catena env del launcher, es. `PI_PROVIDER`/`PI_MODEL`) |
+| `SMOKE_TIMEOUT_S` | timeout esterno del launcher in secondi (default `480`) |
+| `SMOKE_KEEP=1` | non rimuovere scratch/state a fine run (debug) |
+| `HERDR_SESSION` | sessione herdr da usare (default `default`) |
+
+---
+
 ## Architecture
 
 ### M1 — `bin/herdr-launch.sh` (launcher)
