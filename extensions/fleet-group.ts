@@ -485,30 +485,20 @@ export function buildGroupSummaries(
 // --------------------------------------------------- formatGroupDigest ---
 
 /**
- * Genera il markdown verboso del digest di gruppo.
- * Ordina per title (fallback id), include summary integrale e changedFiles.
+ * Genera il digest di gruppo - CONCISO, senza dump verboso dei subagent.
+ * Solo header + lista titoli/stati. Il main farà il resoconto sintetico.
  */
 export function formatGroupDigest(group: GroupRecord | string, resultsSorted: GroupTaskInfo[], label?: string): string {
-  // Overload: se group è string (groupId), costruisci header da results/label
   const groupId = typeof group === "string" ? group : group.groupId;
   const total = typeof group === "string" ? resultsSorted.length : group.expected;
   const groupLabel = typeof group === "string" ? label ?? resultsSorted.find((r) => r.groupLabel)?.groupLabel : group.label;
   const done = resultsSorted.length;
   const labelPart = groupLabel ? ` "${groupLabel}"` : "";
   const header = `\u2691 pi-fleet \u2014 gruppo${labelPart} completo (${done}/${total}) \u2014 ${groupId}`;
-
-  const sections = resultsSorted
+  const list = resultsSorted
     .slice()
     .sort((a, b) => (a.title ?? a.id).localeCompare(b.title ?? b.id))
-    .map((r, idx) => {
-      const title = r.title ?? r.id;
-      const stateLabel = r.state;
-      const summary = (r.summary ?? "").trim() || "(nessuna summary)";
-      const files = r.changedFiles?.length
-        ? `\nFile cambiati: ${r.changedFiles.map((f) => "`" + f + "`").join(", ")}`
-        : "";
-      return `## Task ${idx + 1} \u2014 ${title} [${stateLabel}]\nRisultato:\n${summary}${files}`;
-    });
-
-  return [header, ...sections].join("\n\n");
+    .map((r) => `- ${r.title ?? r.id} [${r.state}]`)
+    .join("\n");
+  return `${header}\n${list}\n\nFai un resoconto sintetico per il gruppo (non ripetere verbatim i report dei subagent).`;
 }

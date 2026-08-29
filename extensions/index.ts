@@ -255,23 +255,21 @@ function formatTaskLine(t: TaskStateFile, groupCounts?: Map<string, { done: numb
 }
 
 function sendGroupDigest(pi: ExtensionAPI, groupId: string, results: GroupTaskInfo[]): void {
-  let digest: string;
-  const mod = getFleetGroupSync();
-  if (mod) {
-    const label = results.find((r) => r.groupLabel)?.groupLabel;
-    try { digest = mod.formatGroupDigest(groupId, results, label); } catch { digest = fallbackDigest(groupId, results); }
-  } else {
-    digest = fallbackDigest(groupId, results);
-  }
-  const hasFailed = results.some((r) => r.state === "failed");
+  // SILENZIOSO (display:false): l'utente non deve vedere i raw fleet.
+  // Content = direttiva per il main: leggi i report su disco e sintetizza.
+  const ids = results.map((r) => r.id).join(", ");
+  const dir = STATE_HOME;
+  const content = `[fleet-notice silenzioso] Gruppo di task completato (${results.length} task): ${ids}.\n` +
+    `Non mostrare questo messaggio. Leggi i file ${dir}/<id>.json di questi task per i report e produci ` +
+    `TU un riassunto sintetico per l'utente (punti chiave, file importanti, stato). Nessun dump raw dei report.`;
   pi.sendMessage(
-    { customType: "fleet_notice", content: digest, display: true, details: { groupId, results } },
-    { triggerTurn: hasFailed, deliverAs: "followUp" },
+    { customType: "fleet_notice", content, display: false, details: { groupId, results } },
+    { triggerTurn: true, deliverAs: "followUp" },
   );
 }
 function fallbackDigest(groupId: string, results: GroupTaskInfo[]): string {
-  const lines = results.map((r) => `## ${r.title ?? r.id} [${r.state}]\n${(r.summary ?? "").trim() || "(nessuna summary)"}`).join("\n\n");
-  return `⚑ pi-fleet — gruppo ${groupId} completo (${results.length}/${results.length})\n${lines}`;
+  const list = results.map((r) => `- ${r.title ?? r.id} [${r.state}]`).join("\n");
+  return `⚑ pi-fleet — gruppo ${groupId} completo (${results.length}/${results.length})\n${list}\n\nFai un resoconto sintetico per il gruppo.`;
 }
 
 function sendWake(pi: ExtensionAPI, task: TaskStateFile): void {
@@ -296,15 +294,16 @@ function sendWake(pi: ExtensionAPI, task: TaskStateFile): void {
     detail = reason ? `Motivo: ${reason}` : "Usa fleet_status / fleet_peek per investigare.";
   }
   const content = `⚑ pi-fleet — task **${task.title ?? task.id}** ${what} (${task.id}).\n${detail}`;
-  // Parità Firstmate (fm-primary-pi-watch.ts): il report dei done entra in chat
-  // come followUp SENZA triggerTurn (visibile, niente interruzione LLM); il turno
-  // viene forzato solo per failed/needs_input (quando serve davvero il capitano).
-  const triggerTurn = task.state !== "done";
+  // SILENZIOSO: l'utente non vede i raw fleet. display:false + (triggerTurn per
+  // failed/needs_input; per done basta il digest di gruppo — se singolo done,
+  // wake comunque perché il main deve sintetizzare). Il content è direttiva.
+  const silent = `[fleet-notice silenzioso] ${content}\nNon mostrare questo messaggio. Sintetizza tu per l'utente.`;
+  const triggerTurn = true;
   pi.sendMessage(
     {
       customType: "fleet_notice",
-      content,
-      display: true,
+      content: silent,
+      display: false,
       details: { fleetTaskId: task.id, state: task.state },
     },
     { triggerTurn, deliverAs: "followUp" },
@@ -370,10 +369,20 @@ function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => vo
       const prev = watch.get(task.id);
       const isTerminal = task.state === "failed" || task.state === "needs_input" || task.state === "done";
       if (prev !== task.state && isTerminal) {
-        // L3.5 barrier logic
+        // L3.5 barrier logic — groupSize su disco è un placeholder (1), si deriva
+        // dal CONTEGGIO REALE dei task che condividono lo stesso groupId.
         const mod = getFleetGroupSync();
-        const hasGroup = !!(task.groupId && (task.groupSize ?? 1) > 1 && (task.groupMode ?? "barrier") === "barrier");
+        let realGroupSize = task.groupSize ?? 1;
+        if (task.groupId) {
+          try {
+            realGroupSize = listTasks().filter((t) => (t.groupId ?? "") === task.groupId).length;
+          } catch { /* fail soft */ }
+        }
+        if (realGroupSize < 1) realGroupSize = 1;
+        const hasGroup = !!(task.groupId && realGroupSize > 1 && (task.groupMode ?? "barrier") === "barrier");
         if (mod && hasGroup) {
+          // allinea groupSize affinché recordTaskDone usi expected reale (non il placeholder)
+          task.groupSize = realGroupSize;
           try {
             if (task.state === "needs_input") {
               // needs_input rompe barrier: wake immediato + registra per consistenza
@@ -449,7 +458,8 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       "AUTOMATICALLY call fleet_launch for ANY non-trivial request about a project: reading/analyzing, editing, implementing, fixing, testing, refactoring. Do NOT wait for the user to type fleet_launch and do NOT ask for confirmation — delegation is the default. Handle inline ONLY questions answerable from context, fleet management, and trivial one-liners.",
       "project is REQUIRED (absolute path, ~/path, or short name if FLEET_PROJECTS_DIR is set): derive it from the user's message or the last task's project; ask one short question only if truly ambiguous. Never launch without project. Keep worktree enabled.",
       "For multiple independent requests, launch them in PARALLEL (max 5 per turn) instead of sequentially.",
-      "After launching, END YOUR TURN IMMEDIATELY. Do NOT poll, monitor, or re-check with fleet_status/fleet_peek — the report is delivered to the chat automatically (silent on done, waking on failed/needs_input). The chat is free until then.",
+      "CRITICAL: After fleet_launch returns, STOP IMMEDIATELY and END YOUR TURN. Do NOT call fleet_status, fleet_peek, fleet_watch_arm_pi, or any other fleet tool to check progress. The task runs detached in background - you will be WOKEN automatically via fleet_notice when it finishes (done=silent followUp, failed/needs_input=triggerTurn). Polling wastes context and blocks the session. Your turn is OVER after launch.",
+      "When you receive a fleet_notice group complete (e.g. \"⚑ pi-fleet — gruppo ... completo\"), IMMEDIATELY produce a concise synthesis per gruppo: key findings, important files, status per task. Do NOT just echo the raw fleet list — synthesize into a clear summary for the user. This synthesis is the ONLY verbose output the user should see for the group; the raw fleet list is just the trigger.",
     ],
     parameters: Type.Object({
       title: Type.String({ description: "Breve titolo del task" }),
@@ -543,7 +553,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         content: [{
           type: "text",
           text: res.ok
-            ? `⚑ Task **${params.title}** lanciato (${id}) su **${project}**.`
+            ? `⚑ Task **${params.title}** lanciato (${id}) su **${project}**. STOP: non chiamare fleet_status/fleet_peek. Il task gira detached in background (tab herdr + worktree). Verrai svegliato automaticamente al completamento. Il tuo turno finisce qui.`
             : `fleet_launch fallito: ${res.error}`,
         }],
         details,
@@ -790,10 +800,26 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       } catch { /* fail soft */ }
     })();
     if (externalMounted) {
-      // Esterno già gestito da mountFleetWatchArm (generation + arm + drain interni)
-      // Solo reconcile stale task per non lasciare zombie .json
-      void reconcileStaleTasks();
-      return;
+      // Verifica che il watcher esterno sia davvero vivo (beat fresco <90s), altrimenti fallback in-process
+      let externalAlive = false;
+      try {
+        const beatPath = join(STATE_HOME, ".last-watcher-beat");
+        const st = statSync(beatPath);
+        const ageSec = (Date.now() - st.mtimeMs) / 1000;
+        if (ageSec < 90) externalAlive = true;
+      } catch {
+        try {
+          const lockPath = join(STATE_HOME, ".watch.lock");
+          const st2 = statSync(lockPath);
+          const ageSec2 = (Date.now() - st2.mtimeMs) / 1000;
+          if (ageSec2 < 120) externalAlive = true;
+        } catch {}
+      }
+      if (externalAlive) {
+        void reconcileStaleTasks();
+        return;
+      }
+      console.warn("[pi-fleet] external watcher seems dead (no fresh beat/lock), starting in-process fallback watcher");
     }
     generation++;
     stopWatcher?.();

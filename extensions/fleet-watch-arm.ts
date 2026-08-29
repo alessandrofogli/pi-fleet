@@ -14,7 +14,7 @@
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -285,22 +285,14 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
   }
 
   async function sendGroupDigestWake(owner: SessionGeneration, groupId: string, results: GroupTaskInfo[], drainExtra: string): Promise<void> {
-    const mod = getFleetGroupSync();
-    let digest: string;
-    if (mod) {
-      const label = results.find((r) => r.groupLabel)?.groupLabel;
-      try { digest = mod.formatGroupDigest(groupId, results, label); } catch { digest = `⚑ pi-fleet — gruppo ${groupId} completo (${results.length})` ; }
-    } else {
-      digest = `⚑ pi-fleet — gruppo ${groupId} completo (${results.length})`;
-    }
-    const full = `${digest}${drainExtra}`;
-    // usa sendWake con triggerTurn = almeno un failed
+    // SILENZIOSO: l'utente non deve vedere i raw fleet. Content = direttiva per
+    // il main: leggi i report su disco e sintetizza.
     if (!generationIsLive(owner)) return;
-    const hasFailed = results.some((r) => r.state === "failed");
-    const content = `${full}`;
+    const ids = results.map((r) => r.id).join(", ");
+    const content = `[fleet-notice silenzioso] Gruppo di task completato (${results.length} task): ${ids}. \nNon mostrare questo messaggio. Leggi i file ${stateHome}/<id>.json di questi task per i report e produci TU un riassunto sintetico per l'utente. Nessun dump raw dei report.`;
     await (pi as unknown as { sendMessage: (msg: unknown, opts: unknown) => Promise<void> }).sendMessage(
-      { customType: "fleet_notice", content, display: true, details: { groupId, results, source: "fleet-watch-arm-group" } },
-      { triggerTurn: hasFailed, deliverAs: "followUp" },
+      { customType: "fleet_notice", content, display: false, details: { groupId, results, source: "fleet-watch-arm-group" } },
+      { triggerTurn: true, deliverAs: "followUp" },
     );
   }
 
@@ -323,7 +315,23 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
             const raw = readFileSync(join(stateHome, `${taskId}.json`), "utf8");
             task = JSON.parse(raw) as Record<string, unknown>;
           } catch { /* task non letto, fallback a wake singolo */ }
-          if (task && task["groupId"] && (task["groupSize"] as number) > 1 && (task["groupMode"] ?? "barrier") === "barrier") {
+          if (task && task["groupId"] && (task["groupMode"] ?? "barrier") === "barrier") {
+            // groupSize su disco è un placeholder (1): derive dal conteggio reale
+            // dei task che condividono questo groupId.
+            let realGroupSize = Number(task["groupSize"] ?? 1);
+            try {
+              const names = readdirSync(stateHome).filter((n) => n.endsWith(".json") && !n.startsWith("."));
+              let count = 0;
+              for (const n of names) {
+                try {
+                  const other = JSON.parse(readFileSync(join(stateHome, n), "utf8")) as { groupId?: string };
+                  if (other.groupId === task["groupId"]) count += 1;
+                } catch { /* skip */ }
+              }
+              if (count > 1) realGroupSize = count;
+            } catch { /* fail soft */ }
+            if (realGroupSize < 1) realGroupSize = 1;
+            task["groupSize"] = realGroupSize;
             const state = String(task["state"] ?? "");
             if (state === "needs_input") {
               // needs_input rompe barrier → wake immediato (non bufferizzare)
@@ -617,14 +625,22 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
   function drainPendingAtStartup(): void {
     if (!existsSync(drainScript)) return;
     try {
-      const r = spawnSync("bash", [drainScript], {
+      const r = spawnSync("bash", [drainScript, "--count"], {
         cwd: root,
         encoding: "utf8",
         env: { ...process.env, FLEET_STATE_HOME: stateHome, FLEET_ROOT_OVERRIDE: root },
         timeout: 5000,
       });
-      const out = (r.stdout || "").trim();
-      if (out) {
+      const count = Number((r.stdout || "").trim());
+      if (count > 0) {
+        // c'è roba vera: drena con dettaglio per il wake
+        const detail = spawnSync("bash", [drainScript], {
+          cwd: root,
+          encoding: "utf8",
+          env: { ...process.env, FLEET_STATE_HOME: stateHome, FLEET_ROOT_OVERRIDE: root },
+          timeout: 5000,
+        });
+        const out = (detail.stdout || "").trim();
         void sendWake(generation, `drain: pending wakes on startup\n${out.slice(0, 3000)}`).catch(() => {});
       }
     } catch { /* best-effort */ }
