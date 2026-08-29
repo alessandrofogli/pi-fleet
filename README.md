@@ -175,6 +175,15 @@ Vedrai un unico digest verboso quando tutti hanno finito. `needs_input` sveglia 
 
 Dettaglio: `groupId`/`groupSize`/`groupLabel`/`groupMode` in `{id}.json`; stato gruppo persistito in `~/.pi/fleet/.wake-groups/{groupId}.json` per recovery dopo restart Pi. `fleet_status` raggruppa per `groupId` e mostra `Gruppo <id> (label) — 2/3 completi:` + `Singoli:`.
 
+**`groupFailPolicy`** (opzionale, default `waitAll`): controlla cosa succede quando un task di un gruppo barrier **fallisce**.
+
+- `waitAll` (default): comportamento attuale — il failed viene bufferizzato, si attende il digest di gruppo quando gli altri task finiscono.
+- `immediate`: il task fallito **sveglia subito** il capitano con il contesto del gruppo (quanti done, quanti pending) invece di aspettare il digest. Gli altri task del gruppo continuano e il gruppo resta pending (il digest finale arriva comunque quando gli altri finiscono).
+
+Usa `immediate` per fail-fast: quando un errore rende inutili gli altri task del gruppo (es. una build che fallisce e invalida gli step successivi). Il campo va passato a `fleet_launch` (`groupFailPolicy`) e finisce in `{id}.json`; il flag CLI è `--group-fail-policy`.
+
+> Nota: la policy riguarda SOLO i `failed`. I `done`/`aborted` restano `waitAll` (bufferizzati) anche con `immediate`; `needs_input` continua a rompere il barrier e svegliare subito in entrambi i casi.
+
 ---
 
 ## Architecture

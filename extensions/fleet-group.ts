@@ -34,6 +34,8 @@ export interface GroupTaskInfo {
   groupSize: number;
   groupLabel?: string;
   groupMode: "barrier" | "streaming";
+  /** Policy di fallimento del gruppo: waitAll (default) | immediate (failed sveglia subito). */
+  groupFailPolicy?: "waitAll" | "immediate";
 }
 
 /**
@@ -62,6 +64,7 @@ export interface TaskStateFile {
   groupSize?: number;
   groupLabel?: string;
   groupMode?: "barrier" | "streaming";
+  groupFailPolicy?: "waitAll" | "immediate";
 }
 
 /** Record in memoria per un gruppo barrier. */
@@ -72,11 +75,14 @@ export interface GroupRecord {
   results: Map<string, GroupTaskInfo>;
   createdAt: number;
   label?: string;
+  /** Policy di fallimento: waitAll (default) | immediate (failed sveglia subito). */
+  failPolicy?: "waitAll" | "immediate";
 }
 
 export type GroupEvent =
   | { kind: "group_complete"; groupId: string; results: GroupTaskInfo[] }
   | { kind: "needs_input"; task: GroupTaskInfo; group: GroupRecord }
+  | { kind: "group_failed_immediate"; task: GroupTaskInfo; group: GroupRecord }
   | { kind: "buffered"; taskId: string; groupId: string };
 
 // ----------------------------------------------------------- helpers base ---
@@ -99,9 +105,12 @@ export function isGroupComplete(group: GroupRecord): boolean {
 /**
  * Decide se il task va bufferizzato invece di svegliare subito.
  * Solo barrier + done/failed viene bufferizzato; streaming mai.
+ * Eccezione: con groupFailPolicy "immediate" il FAILED non viene bufferizzato
+ * (sveglia subito); done/aborted restano waitAll anche con policy immediate.
  */
 export function shouldBuffer(task: GroupTaskInfo): boolean {
   if (task.groupMode !== "barrier") return false;
+  if (task.state === "failed" && task.groupFailPolicy === "immediate") return false;
   return task.state === "done" || task.state === "failed";
 }
 
@@ -119,6 +128,7 @@ export function toGroupTaskInfo(task: TaskStateFile): GroupTaskInfo {
     groupSize: task.groupSize ?? 1,
     groupLabel: task.groupLabel,
     groupMode: task.groupMode ?? "barrier",
+    groupFailPolicy: task.groupFailPolicy,
   };
 }
 
@@ -131,6 +141,7 @@ interface PersistedGroup {
   results: Record<string, GroupTaskInfo>;
   createdAt: number;
   label?: string;
+  failPolicy?: "waitAll" | "immediate";
 }
 
 function groupsDir(stateHome: string): string {
@@ -151,6 +162,7 @@ export function persistGroup(stateHome: string, record: GroupRecord): void {
     results: Object.fromEntries(record.results.entries()),
     createdAt: record.createdAt,
     label: record.label,
+    failPolicy: record.failPolicy,
   };
   const dest = join(dir, `${record.groupId}.json`);
   const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
@@ -189,6 +201,13 @@ export function loadGroups(stateHome: string): Map<string, GroupRecord> {
         ),
         createdAt: typeof data.createdAt === "number" ? data.createdAt : Date.now(),
         label: typeof data.label === "string" ? data.label : undefined,
+        // retrocompatibile: file senza failPolicy → waitAll (default)
+        failPolicy:
+          data.failPolicy === "immediate"
+            ? "immediate"
+            : data.failPolicy === "waitAll"
+              ? "waitAll"
+              : undefined,
       };
       out.set(record.groupId, record);
     } catch {
@@ -241,6 +260,9 @@ export function getOrCreateGroup(
     if (info.groupLabel && !existing.label) {
       existing.label = info.groupLabel;
     }
+    if (info.groupFailPolicy === "immediate" && !existing.failPolicy) {
+      existing.failPolicy = info.groupFailPolicy;
+    }
     return existing;
   }
   // crea nuovo record: pending contiene tutti gli id attesi inizialmente
@@ -257,6 +279,7 @@ export function getOrCreateGroup(
     results: new Map<string, GroupTaskInfo>(),
     createdAt: Date.now(),
     label: info.groupLabel,
+    failPolicy: info.groupFailPolicy,
   };
   groupMap.set(gid, record);
   return record;
@@ -290,6 +313,7 @@ export function recordTaskDone(
   // assicurati che expected sia allineato
   if (effectiveExpected > group.expected) group.expected = effectiveExpected;
   if (info.groupLabel && !group.label) group.label = info.groupLabel;
+  if (info.groupFailPolicy === "immediate" && !group.failPolicy) group.failPolicy = info.groupFailPolicy;
 
   // needs_input rompe sempre la barrier — wake immediato
   if (task.state === "needs_input") {
@@ -309,6 +333,17 @@ export function recordTaskDone(
     // single non necessita persistenza barrier, ma pulisci eventuale file orfano
     try { removeGroup(stateHome, group.groupId); } catch { /* ignore */ }
     return { kind: "group_complete", groupId: group.groupId, results: [info] };
+  }
+
+  // gruppo multi-task + groupFailPolicy "immediate" + failed → wake SUBITO.
+  // NON bufferizza, ma registra comunque il result nel gruppo e persiste:
+  // il gruppo resta pending e il digest scatta quando finiscono gli altri.
+  // done/aborted restano waitAll (bufferizzati) anche con policy immediate.
+  if (task.state === "failed" && info.groupFailPolicy === "immediate") {
+    group.results.set(info.id, info);
+    group.pending.delete(info.id);
+    try { persistGroup(stateHome, group); } catch { /* best-effort */ }
+    return { kind: "group_failed_immediate", task: info, group };
   }
 
   // gruppo multi-task: decide se bufferizzare
@@ -401,6 +436,10 @@ export function rebuildGroupsFromDisk(
     // expected è il max tra dichiarato e cardinalità reale
     const expected = Math.max(maxDeclared, tasks.length);
     const label = tasks.find((t) => t.groupLabel)?.groupLabel ?? persisted.get(gid)?.label;
+    // policy del gruppo: prevalgono i task con immediate esplicito, poi il persistito
+    const failPolicy =
+      tasks.find((t) => t.groupFailPolicy === "immediate")?.groupFailPolicy ??
+      persisted.get(gid)?.failPolicy;
     const createdAt =
       persisted.get(gid)?.createdAt ??
       Math.min(...tasks.map((t) => t.startedAt ?? Date.now()));
@@ -447,6 +486,7 @@ export function rebuildGroupsFromDisk(
       results,
       createdAt,
       label,
+      failPolicy,
     };
     out.set(gid, record);
   }

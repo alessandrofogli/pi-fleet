@@ -68,6 +68,7 @@ interface TaskStateFile {
   groupSize?: number;
   groupLabel?: string;
   groupMode?: "barrier" | "streaming";
+  groupFailPolicy?: "waitAll" | "immediate";
 }
 
 function stateDir(): string {
@@ -203,6 +204,7 @@ interface FleetLaunchParams {
   groupId?: string;
   groupLabel?: string;
   groupMode?: "barrier" | "streaming";
+  groupFailPolicy?: "waitAll" | "immediate";
 }
 
 function spawnLauncher(taskId: string, title: string, briefPath: string, params: FleetLaunchParams): { ok: boolean; error?: string; logPath?: string } {
@@ -216,6 +218,7 @@ function spawnLauncher(taskId: string, title: string, briefPath: string, params:
   if (gid) args.push("--group-id", gid);
   if (params.groupLabel) args.push("--group-label", params.groupLabel);
   if (params.groupMode) args.push("--group-mode", params.groupMode);
+  if (params.groupFailPolicy) args.push("--group-fail-policy", params.groupFailPolicy);
 
   const logPath = join(STATE_HOME, `${taskId}.log`);
   try {
@@ -246,8 +249,9 @@ function formatTaskLine(t: TaskStateFile, groupCounts?: Map<string, { done: numb
   let grp = "";
   if (t.groupId && (t.groupSize ?? 1) > 1) {
     const c = groupCounts?.get(t.groupId);
-    if (c) grp = ` (grp:${shortGroupId(t.groupId)} ${c.done}/${c.total})`;
-    else grp = ` (grp:${shortGroupId(t.groupId)} ${t.groupSize})`;
+    const pol = t.groupFailPolicy === "immediate" ? " fail:immediate" : "";
+    if (c) grp = ` (grp:${shortGroupId(t.groupId)} ${c.done}/${c.total}${pol})`;
+    else grp = ` (grp:${shortGroupId(t.groupId)} ${t.groupSize}${pol})`;
   } else if (t.groupId && t.groupLabel) {
     grp = ` (grp:${shortGroupId(t.groupId)})`;
   }
@@ -272,7 +276,7 @@ function fallbackDigest(groupId: string, results: GroupTaskInfo[]): string {
   return `⚑ pi-fleet — gruppo ${groupId} completo (${results.length}/${results.length})\n${list}\n\nFai un resoconto sintetico per il gruppo.`;
 }
 
-function sendWake(pi: ExtensionAPI, task: TaskStateFile): void {
+function sendWake(pi: ExtensionAPI, task: TaskStateFile, overrides?: { detail?: string }): void {
   let what: string;
   let detail: string;
   if (task.state === "done") {
@@ -293,6 +297,9 @@ function sendWake(pi: ExtensionAPI, task: TaskStateFile): void {
     const reason = (task.summary ?? "").trim();
     detail = reason ? `Motivo: ${reason}` : "Usa fleet_status / fleet_peek per investigare.";
   }
+  // override opzionale: il watcher (es. group_failed_immediate) può sostituire il
+  // dettaglio con il contesto gruppo senza duplicare la logica di invio
+  if (overrides?.detail !== undefined) detail = overrides.detail;
   const content = `⚑ pi-fleet — task **${task.title ?? task.id}** ${what} (${task.id}).\n${detail}`;
   // SILENZIOSO: l'utente non vede i raw fleet. display:false + (triggerTurn per
   // failed/needs_input; per done basta il digest di gruppo — se singolo done,
@@ -400,6 +407,17 @@ function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => vo
               } else if (ev.kind === "needs_input") {
                 watch.set(task.id, task.state);
                 sendWake(pi, task);
+              } else if (ev.kind === "group_failed_immediate") {
+                // policy immediate: failed in gruppo → wake SUBITO con contesto gruppo
+                watch.set(task.id, task.state);
+                const done = ev.group.results.size;
+                const pending = ev.group.pending.size;
+                const lbl = ev.group.label ? ` "${ev.group.label}"` : "";
+                const reason = (task.summary ?? "").trim();
+                const mot = reason ? `Motivo: ${reason}` : "Usa fleet_status / fleet_peek per investigare.";
+                sendWake(pi, task, {
+                  detail: `Gruppo ${shortGroupId(ev.group.groupId)}${lbl} (policy immediate): ${done} done, ${pending} pending.\n${mot}`,
+                });
               }
             }
           } catch {
@@ -471,6 +489,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       groupId: Type.Optional(Type.String({ description: "Group id for barrier digest (e.g. grp-20260828-a1b2c3). Auto-generated via batch window if omitted." })),
       groupLabel: Type.Optional(Type.String({ description: "Optional label for the group (shown in digest)" })),
       groupMode: Type.Optional(Type.String({ description: "Group mode: barrier (wait all) or streaming (per-task). Default barrier." })),
+      groupFailPolicy: Type.Optional(Type.String({ description: "waitAll (default) | immediate: failed in gruppo sveglia subito il capitano" })),
     }),
     // L3.5: se lanci N in parallelo nello stesso turno, riusa stesso groupId (auto-batch)
     // La guideline aiuta il modello a passare groupId esplicito se vuole gruppi separati.
@@ -528,6 +547,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         groupSize: 1, // placeholder — il coordinatore conta reale su disco, o si aggiorna via batch
         groupLabel: params.groupLabel,
         groupMode: effectiveGroupMode,
+        groupFailPolicy: params.groupFailPolicy,
       };
       writeTask(task);
 
