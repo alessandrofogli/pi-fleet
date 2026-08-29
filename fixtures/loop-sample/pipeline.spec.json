@@ -1,0 +1,16 @@
+{
+  "scope": "Fixture of the review&fix loop (T-015): a tiny shell 'shapes calculator' (rectangle area and perimeter) that must keep its syntax valid and behave correctly while following the sample-style-review checklist. The loop may touch src/ only.",
+  "slices": [
+    {
+      "id": "sample-core",
+      "title": "Sample shell implementation",
+      "impl_skills": [],
+      "review_skills": ["sample-style-review"],
+      "deps": []
+    }
+  ],
+  "checks": [
+    { "name": "syntax",   "cmd": "bash bin/check.sh syntax" },
+    { "name": "behavior", "cmd": "bash bin/check.sh behavior" }
+  ]
+}
