@@ -1,7 +1,7 @@
-# pi-fleet · fleet-lock-lib.sh — libreria lock + beacon (L3 watcher esterno)
-# Sourced con: . "$SCRIPT_DIR/fleet-lock-lib.sh"
-# Fornisce: fleet_lock_try_acquire / is_owned / release / owner_pid / beat_touch / beat_age
-# Stato: $FLEET_STATE_HOME (default ~/.pi/fleet), lock .watch.lock (PID), beat .last-watcher-beat
+# pi-fleet · fleet-lock-lib.sh — lock + beacon library (L3 external watcher)
+# Sourced with: . "$SCRIPT_DIR/fleet-lock-lib.sh"
+# Provides: fleet_lock_try_acquire / is_owned / release / owner_pid / beat_touch / beat_age
+# State: $FLEET_STATE_HOME (default ~/.pi/fleet), lock .watch.lock (PID), beat .last-watcher-beat
 set -u
 
 STATE="${FLEET_STATE_HOME:-$HOME/.pi/fleet}"
@@ -9,15 +9,15 @@ mkdir -p "$STATE" 2>/dev/null || true
 WATCH_LOCK="$STATE/.watch.lock"
 LAST_BEAT="$STATE/.last-watcher-beat"
 
-# Legge PID dal lock file (stringa vuota se mancante/illecibile).
+# Reads the PID from the lock file (empty string if missing/unreadable).
 fleet_lock_owner_pid() {
   if [ -f "$WATCH_LOCK" ]; then
     tr -d ' \t\r\n' < "$WATCH_LOCK" 2>/dev/null | head -c 32 || true
   fi
 }
 
-# Tenta di acquisire il lock singleton. Ritorna 0 se acquisito, 1 se occupato da watcher vivo.
-# Gestione stale lock: se PID non vivo (kill -0 fallisce), ruba il lock.
+# Tries to acquire the singleton lock. Returns 0 if acquired, 1 if held by a live watcher.
+# Stale lock handling: if the PID is not alive (kill -0 fails), steals the lock.
 fleet_lock_try_acquire() {
   mkdir -p "$STATE" 2>/dev/null || true
   local owner=""
@@ -26,7 +26,7 @@ fleet_lock_try_acquire() {
     if [ -n "$owner" ]; then
       case "$owner" in
         ''|*[!0-9]*)
-          # contenuto non numerico → stale
+          # non-numeric content → stale
           rm -f "$WATCH_LOCK" 2>/dev/null || true
           owner=""
           ;;
@@ -34,7 +34,7 @@ fleet_lock_try_acquire() {
           if kill -0 "$owner" 2>/dev/null; then
             return 1
           else
-            # PID morto → stale, ruba
+            # dead PID → stale, steal
             rm -f "$WATCH_LOCK" 2>/dev/null || true
             owner=""
           fi
@@ -44,11 +44,11 @@ fleet_lock_try_acquire() {
       rm -f "$WATCH_LOCK" 2>/dev/null || true
     fi
   fi
-  # Tentativo atomico con noclobber
+  # Atomic attempt with noclobber
   if ( set -o noclobber; echo "$$" > "$WATCH_LOCK" ) 2>/dev/null; then
     return 0
   fi
-  # Race: ricontrolla stale (altro processo morto tra check e write)
+  # Race: re-check stale (another process died between check and write)
   owner=$(fleet_lock_owner_pid)
   if [ -n "$owner" ]; then
     case "$owner" in
@@ -68,7 +68,7 @@ fleet_lock_try_acquire() {
   return 1
 }
 
-# Verifica se il lock appartiene a questo PID o a un antenato (ps ppid chain, 8 livelli), e se PID vivo.
+# Checks whether the lock belongs to this PID or an ancestor (ps ppid chain, 8 levels), and whether the PID is alive.
 fleet_lock_is_owned() {
   local owner
   owner=$(fleet_lock_owner_pid)
@@ -81,7 +81,7 @@ fleet_lock_is_owned() {
   if [ "$owner" = "$$" ]; then
     return 0
   fi
-  # BASHPID può differire da $$ in subshell
+  # BASHPID can differ from $$ in a subshell
   if [ -n "${BASHPID:-}" ] && [ "$owner" = "$BASHPID" ]; then
     return 0
   fi
@@ -99,20 +99,20 @@ fleet_lock_is_owned() {
   return 1
 }
 
-# Rimuove il lock solo se owned.
+# Removes the lock only if owned.
 fleet_lock_release() {
   if fleet_lock_is_owned 2>/dev/null; then
     rm -f "$WATCH_LOCK" 2>/dev/null || true
   fi
 }
 
-# Scrive timestamp epoch su LAST_BEAT (beacon liveness).
+# Writes an epoch timestamp to LAST_BEAT (liveness beacon).
 fleet_beat_touch() {
   mkdir -p "$STATE" 2>/dev/null || true
   date +%s > "$LAST_BEAT" 2>/dev/null || true
 }
 
-# Ritorna secondi da ultimo beat (0 se file mancante o illeggibile).
+# Returns seconds since last beat (0 if the file is missing or unreadable).
 fleet_beat_age() {
   if [ ! -f "$LAST_BEAT" ]; then
     printf '0\n'
@@ -122,7 +122,7 @@ fleet_beat_age() {
   now=$(date +%s 2>/dev/null) || { printf '0\n'; return 0; }
   beat=$(tr -d ' \t\r\n' < "$LAST_BEAT" 2>/dev/null) || beat=""
   case "$beat" in ''|*[!0-9]*)
-    # fallback a mtime
+    # fallback to mtime
     if [ "$(uname)" = "Darwin" ]; then
       beat=$(stat -f %m "$LAST_BEAT" 2>/dev/null || echo "$now")
     else
@@ -131,7 +131,7 @@ fleet_beat_age() {
     ;;
   esac
   case "$beat" in ''|*[!0-9]*) printf '0\n'; return 0 ;; esac
-  # clamp a 0 se beat nel futuro (clock skew)
+  # clamp to 0 if beat is in the future (clock skew)
   if [ "$beat" -gt "$now" ]; then
     printf '0\n'
   else

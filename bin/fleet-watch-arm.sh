@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # pi-fleet · watch arm — forks fleet-watch.sh as tracked child, lock + beacon, retry, recovery
 #
-# Port semplificato di firstmate/bin/fm-watch-arm.sh per pi-fleet (Livello 3).
-# Stato su disco in STATE="${FLEET_STATE_HOME:-$HOME/.pi/fleet}" (coerente con extensions/index.ts).
-# Output contract: stampa SEMPRE una riga classificabile (signal:/stale:/check:/heartbeat/watcher: ...)
-# così l'estensione può classificare senza parsing fragile.
+# Simplified port of firstmate/bin/fm-watch-arm.sh for pi-fleet (Level 3).
+# State on disk in STATE="${FLEET_STATE_HOME:-$HOME/.pi/fleet}" (consistent with extensions/index.ts).
+# Output contract: ALWAYS prints a classifiable line (signal:/stale:/check:/heartbeat/watcher: ...)
+# so the extension can classify without fragile parsing.
 #
-# Modalità:
-#   (default)                      arm normale — acquisisce lock, lancia watcher figlio, classifica uscita
-#   --handling-delivered GEN --watcher-pid PID   conferma consegna wake (chiamato dall'estensione prima di re-arm)
-#   --restart                       forza riacquisizione (re-arm dopo close)
-#   --drain-check                   solo verifica se c'è coda pending (per estensione)
+# Modes:
+#   (default)                      normal arm — acquire lock, launch child watcher, classify exit
+#   --handling-delivered GEN --watcher-pid PID   confirm wake delivery (called by the extension before re-arm)
+#   --restart                       force re-acquisition (re-arm after close)
+#   --drain-check                   only check whether there is a pending queue (for the extension)
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,7 +18,7 @@ FLEET_ROOT="${FLEET_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FLEET_HOME="${FLEET_HOME:-$FLEET_ROOT}"
 STATE="${FLEET_STATE_HOME:-$HOME/.pi/fleet}"
 
-# Source fleet-lock-lib se presente (future L3: state/.watch.lock + beacon helpers).
+# Source fleet-lock-lib if present (future L3: state/.watch.lock + beacon helpers).
 if [[ -f "$SCRIPT_DIR/fleet-lock-lib.sh" ]]; then
   # shellcheck source=bin/fleet-lock-lib.sh
   source "$SCRIPT_DIR/fleet-lock-lib.sh"
@@ -116,7 +116,7 @@ append_cycle_log() {
   ts=$(date +%s)
   # Format: armPid<TAB>watcherPid<TAB>ts<TAB>exit_code<TAB>reason
   printf '%s\t%s\t%s\t%s\t%s\n' "$arm_pid" "$watcher_pid" "$ts" "$exit_code" "$reason" >> "$CYCLE_LOG" 2>/dev/null || true
-  # Size-cap to max 500 righe
+  # Size-cap to max 500 lines
   local lines
   lines=$(wc -l < "$CYCLE_LOG" 2>/dev/null | tr -d '[:space:]')
   case "$lines" in ''|*[!0-9]*) return ;; esac
@@ -224,7 +224,7 @@ if [[ "$DRAIN_CHECK" == 1 ]]; then
 fi
 
 # ---------------------------------------------------------------- default arm ---
-# 1. Verifica lock ownership (skip if --restart)
+# 1. Verify lock ownership (skip if --restart)
 if [[ "$RESTART" -eq 0 ]] && lock_held_by_live_other; then
   holder=$(cat "$WATCH_LOCK" 2>/dev/null | tr -d '[:space:]')
   # Also verify beacon fresh already done in lock_held_by_live_other
@@ -232,15 +232,15 @@ if [[ "$RESTART" -eq 0 ]] && lock_held_by_live_other; then
   exit 0
 fi
 
-# 2. Acquisisci lock + queue dir
+# 2. Acquire lock + queue dir
 acquire_lock
 ARM_PID="${BASHPID:-$$}"
 
 # 3. Genera generation
 GEN=$(generate_generation)
 
-# 4. Lancia fleet-watch.sh come figlio tracciato (foreground, non detached)
-#    Stampa header started prima di wait, così l'estensione può classificare immediatamente.
+# 4. Launch fleet-watch.sh as a tracked child (foreground, not detached)
+#    Print the started header BEFORE wait, so the extension can classify immediately.
 if [[ ! -x "$WATCH_SCRIPT" && ! -f "$WATCH_SCRIPT" ]]; then
   # No watcher script yet (L3 not fully installed) → report FAILED for retry
   echo "watcher: FAILED - fleet-watch.sh not found at $WATCH_SCRIPT"
@@ -315,7 +315,7 @@ if [[ "$WATCH_EXIT" -ne 0 ]]; then
 fi
 
 # 7. Zero exit but no actionable reason → check delivery ledger (like firstmate close_unobserved_cycle)
-#    Se watcher ha scritto delivery prima di rilasciare lock, recupera reason
+#    If the watcher wrote a delivery before releasing the lock, recover the reason
 if [[ -f "$DELIVERIES" ]]; then
   # Last delivery for this watcher pid
   last_reason=$(grep "^${WATCHER_PID}	" "$DELIVERIES" 2>/dev/null | tail -1 | cut -f2- || true)

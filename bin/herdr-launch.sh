@@ -1,33 +1,32 @@
 #!/usr/bin/env bash
-# pi-fleet · launcher task (CLI per M1, chiamato dall'estensione per M2+).
+# pi-fleet · task launcher (CLI for M1, called by the extension for M2+).
 #
-# Spawna un sub-agent "visibile": crea un pane herdr reale (split laterale
-# nel tab corrente del chiamante) con pi dentro, gli passa un brief, e al
-# completamento (done-marker su disco) riporta il risultato, chiude il pane e
-# rilascia la worktree.
+# Spawns a "visible" sub-agent: creates a real herdr pane (lateral split in the
+# caller's current tab) with pi inside, hands it a brief, and on completion
+# (disk done-marker) reports the result, closes the pane and releases the worktree.
 #
-# Uso:
-#   bin/herdr-launch.sh "<titolo>" "<brief>" [flags]
-#   bin/herdr-launch.sh "<titolo>" @file-brief.md [flags]
+# Usage:
+#   bin/herdr-launch.sh "<title>" "<brief>" [flags]
+#   bin/herdr-launch.sh "<title>" @file-brief.md [flags]
 #
 # Flags:
-#   --project <path>     repo di lavoro (default: dir corrente)
-#   --no-worktree        disabilita treehouse (default: worktree SÌ)
-#   --timeout-min <n>    timeout attesa done-marker (default: 360 = 6h)
-#   --task-id <id>       id task esplicito (default: generato)
-#   --model <prov/mod>   override modello figlio (default: eredita dal parent)
-#   --session <name>     sessione herdr (default: HERDR_SESSION | "default")
-#   --delivery-posture <p>  posture di consegna del task (no-mistakes|direct-PR|local-only|yolo, default: no-mistakes)
-#   --group-fail-policy <p>  waitAll (default) | immediate: failed in gruppo sveglia subito il capitano
-#   --gate              gate meccanico attivo (T-011): il launcher riesegue da sé il gate anti-frode
-#                       a fine task; il figlio riceve la sezione GATE nel prompt (solo posture no-mistakes)
-#   --auto-pr <bool>    PR automatica a gate verde (true|false, da gate.yaml). Merge MAI automatico.
-#   --debug              stampa output raw dei comandi herdr
+#   --project <path>     working repo (default: current dir)
+#   --no-worktree        disable treehouse (default: worktree YES)
+#   --timeout-min <n>    done-marker wait timeout (default: 360 = 6h)
+#   --task-id <id>       explicit task id (default: generated)
+#   --model <prov/mod>   child model override (default: inherited from parent)
+#   --session <name>     herdr session (default: HERDR_SESSION | "default")
+#   --delivery-posture <p>  task delivery posture (no-mistakes|direct-PR|local-only|yolo, default: no-mistakes)
+#   --group-fail-policy <p>  waitAll (default) | immediate: a failed group task wakes the captain immediately
+#   --gate              mechanical gate active (T-011): the launcher re-runs the anti-fraud gate itself
+#                       at task end; the child receives the GATE section in the prompt (only no-mistakes posture)
+#   --auto-pr <bool>    automatic PR on green gate (true|false, from gate.yaml). Merge NEVER automatic.
+#   --debug              print raw output of herdr commands
 set -u
 
 # ---------------------------------------------------------------- config ----
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GATE_RUN="$SCRIPT_DIR/gate-run.sh"   # risolto rispetto al proprio dir: niente path assoluti hardcoded
+GATE_RUN="$SCRIPT_DIR/gate-run.sh"   # resolved relative to its own dir: no hardcoded absolute paths
 FM_DEBUG=0
 SESSION="${HERDR_SESSION:-default}"
 PROJECT="$(pwd)"
@@ -67,33 +66,33 @@ while [[ $# -gt 0 ]]; do
     *)
       if [[ -z "$TITLE" ]]; then TITLE="$1"; shift
       elif [[ -z "$BRIEF" ]]; then BRIEF="$1"; shift
-      else echo "error: argomenti inattesi: $*" >&2; exit 2; fi ;;
+      else echo "error: unexpected arguments: $*" >&2; exit 2; fi ;;
   esac
 done
 
-[[ -z "$TITLE" ]] && { echo "error: manca il titolo" >&2; exit 2; }
+[[ -z "$TITLE" ]] && { echo "error: missing title" >&2; exit 2; }
 if [[ "$PROJECT" == "$HOME" ]]; then
-  echo "warning: nessun --project esplicito, cwd = HOME. Passa --project <path>." >&2
+  echo "warning: no explicit --project, cwd = HOME. Pass --project <path>." >&2
 fi
-[[ -z "$BRIEF" ]] && { echo "error: manca il brief" >&2; exit 2; }
+[[ -z "$BRIEF" ]] && { echo "error: missing brief" >&2; exit 2; }
 
 STATE_HOME="${FLEET_STATE_HOME:-$HOME/.pi/fleet}"
 mkdir -p "$STATE_HOME/tasks"
 
 log()  { printf '[fleet] %s\n' "$*"; }
-herr() { printf '[fleet] ERRORE: %s\n' "$*" >&2; }
+herr() { printf '[fleet] ERROR: %s\n' "$*" >&2; }
 
-# Marca failed su uscita prematura del launcher (tab/agent/prompt falliti):
-# senza questo lo stato resta 'spawning' e il task muore SILENZIOSO (il watcher
-# non wake su spawning).
+# Marks failed on premature launcher exit (failed tab/agent/prompt):
+# without this the state stays 'spawning' and the task dies SILENTLY (the watcher
+# does not wake on spawning).
 fail_task() {
-  local why="${1:-errore del launcher}"
+  local why="${1:-launcher error}"
   jq --arg done "$(date +%s)000" --arg sum "$why" \
     '.state="failed" | .doneAt=($done|tonumber) | .summary=$sum' "$STATE_JSON" \
     > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
 }
 
-# Aggiorna lo stato su disco in modo robusto (jq, non sed).
+# Updates state on disk robustly (jq, not sed).
 set_state() {
   local val="$1" done_ms="${2:-}"
   local patch=".state = \"$val\""
@@ -101,14 +100,14 @@ set_state() {
   jq "$patch" "$STATE_JSON" > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
 }
 
-# Scrive pane/tab/workspace nel json DOPO il tab create (atomic).
+# Writes pane/tab/workspace into the json AFTER the tab create (atomic).
 add_pane_ids() {
   jq --arg p "$PANE_ID" --arg t "$TAB_ID" --arg w "$WORKSPACE" \
     '.paneId=$p | .tabId=$t | .workspaceId=$w' "$STATE_JSON" \
     > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
 }
 
-# Enable debugging per le chiamate herdr
+# Enable debugging for herdr calls
 herdr_cli() {
   if [[ "$FM_DEBUG" == 1 ]]; then
     echo "  → herdr $*" >&2
@@ -119,17 +118,17 @@ herdr_cli() {
 # Legge un brief da file se comincia con @
 if [[ "$BRIEF" == @* ]]; then
   BRIEF_FILE="${BRIEF#@}"
-  [[ -f "$BRIEF_FILE" ]] || { herr "file brief non trovato: $BRIEF_FILE"; exit 2; }
+  [[ -f "$BRIEF_FILE" ]] || { herr "brief file not found: $BRIEF_FILE"; exit 2; }
   BRIEF_CONTENT="$(cat "$BRIEF_FILE")"
 else
   BRIEF_CONTENT="$BRIEF"
 fi
 
-# ------------------------------------------------------- 1. workspace herdr ----
-# Il figlio gira in una workspace "fleet" DEDICATA per progetto: non tocca MAI il
-# workspace/tab del capitano. Da qui è visibile SOLO nella sidebar agents di herdr
-# a sinistra (stato roll-up per workspace) e non occupa spazio nel tab della chat.
-# Slug leggibile dal titolo (fallback quando --task-id non è passato).
+# ------------------------------------------------------- 1. herdr workspace ----
+# The child runs in a "fleet" workspace DEDICATED per project: it NEVER touches the
+# captain's workspace/tab. From there it is visible ONLY in herdr's agents sidebar
+# on the left (roll-up state per workspace) and takes no room in the chat tab.
+# Slug readable from the title (fallback when --task-id is not passed).
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//' | cut -c1-30 | sed 's/-$//'
 }
@@ -137,19 +136,19 @@ slugify() {
 TASK_ID="${TASK_ID_OVERRIDE:-$(slugify "$TITLE")-$(printf '%03d' $((RANDOM % 1000)))}"
 PANE_ID=""
 TAB_ID=""
-# Nome agente: vincolo herdr = 1-32 char, inizia con lettera minuscola.
-# Id del task (readabile, lungo) e nome agente (corto) sono SPAZZATI di proposito.
+# Agent name: herdr constraint = 1-32 chars, starts with a lowercase letter.
+# The task id (readable, long) and the agent name (short) are DELIBERATELY decoupled.
 AGENT_NAME="f-$(printf '%s' "$(slugify "$TITLE")" | cut -c1-23)-$(printf '%04d' $((RANDOM % 10000)))"
 log "task: $TASK_ID — $TITLE"
 
 resolve_fleet_workspace() {
-  # Workspace "fleet" DEDICATA (una sola): i figli girano qui, MAI nel
-  # workspace/tab del capitano → visibili SOLO nella sidebar agents di herdr
-  # (roll-up per workspace). `workspace list` NON espone la cwd, quindi il
-  # match è per label; se esistono più workspace "fleet" prende la prima e
-  # riusa sempre quella nei lanci successivi.
-  # NOTA stdout pulito: la funzione è usata dentro $(...) → i log vanno su
-  # stderr, su stdout SOLO l'id della workspace.
+  # DEDICATED "fleet" workspace (single one): children run here, NEVER in the
+  # captain's workspace/tab → visible ONLY in herdr's agents sidebar
+  # (roll-up per workspace). `workspace list` does NOT expose the cwd, so the
+  # match is by label; if multiple "fleet" workspaces exist it takes the first
+  # and always reuses it on subsequent launches.
+  # NOTE clean stdout: the function is used inside $(...) → logs go to
+  # stderr, ONLY the workspace id on stdout.
   local ws_out ws
   ws_out="$(herdr_cli workspace list)" || ws_out=""
   ws="$(printf '%s' "$ws_out" | jq -r --arg l "fleet" \
@@ -161,7 +160,7 @@ resolve_fleet_workspace() {
     # (shape documentata: .result.workspace / .result.tab / .result.root_pane).
     ws="$(herdr_cli workspace create --label "fleet" --cwd "$PROJECT" --no-focus \
       | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)" || ws=""
-    [[ -n "$ws" ]] && { log "workspace fleet creata: $ws" >&2; echo "$ws"; return 0; }
+    [[ -n "$ws" ]] && { log "fleet workspace created: $ws" >&2; echo "$ws"; return 0; }
     sleep 1
     ws_out="$(herdr_cli workspace list)" || continue
     ws="$(printf '%s' "$ws_out" | jq -r --arg l "fleet" \
@@ -177,9 +176,9 @@ TASK_CWD="$PROJECT"
 WT_PATH=""
 if [[ "$USE_WORKTREE" == 1 ]]; then
   WT_OUT="$(cd "$PROJECT" && treehouse get --lease --no-fetch --lease-holder "pi-fleet:$TASK_ID" 2>&1)" \
-    || { herr "treehouse get fallito per '$PROJECT': $WT_OUT"; exit 1; }
-  WT_PATH="${WT_OUT##*$'\n'}"   # il path è l'ultima riga
-  [[ -d "$WT_PATH" ]] || { herr "worktree non valida: $WT_PATH"; exit 1; }
+    || { herr "treehouse get failed for '$PROJECT': $WT_OUT"; exit 1; }
+  WT_PATH="${WT_OUT##*$'\n'}"   # the path is the last line
+  [[ -d "$WT_PATH" ]] || { herr "invalid worktree: $WT_PATH"; exit 1; }
   TASK_CWD="$WT_PATH"
   log "worktree: $WT_PATH"
 fi
@@ -190,46 +189,46 @@ release_worktree() {
   WT_PATH=""
 }
 
-# Modello del figlio: il default di pi senza --model è il primo modello del
-# catalogo (qui opencode/kimi-k2.6, senza credito). Ereditiamo quindi il modello
-# della sessione main con il flag LUNGO --model (pi non ha -m; con -m fallisce).
-# REGOLA: SI passa SEMPRE il full id `provider/id` — il bare id (es.
-# "deepseek-v4-flash") collide tra più provider e `pi --model <bare>` parte ed
-# esce in ~2.6s per ambiguità. Mai `pi --model <bare>`.
+# Child model: pi's default without --model is the first model of the
+# catalog (here opencode/kimi-k2.6, without credit). We therefore inherit the main
+# session's model with the LONG --model flag (pi has no -m; with -m it fails).
+# RULE: ALWAYS pass the full id `provider/id` — the bare id (e.g.
+# "deepseek-v4-flash") collides across providers and `pi --model <bare>` starts
+# and exits in ~2.6s due to ambiguity. Never `pi --model <bare>`.
 MODEL_ARGS=()
 if [[ -n "$MODEL_OVERRIDE" ]]; then
   if [[ "$MODEL_OVERRIDE" == */* ]]; then
     MODEL_ARGS=(--model "$MODEL_OVERRIDE")
-    log "modello figlio (override): $MODEL_OVERRIDE"
+    log "child model (override): $MODEL_OVERRIDE"
   elif [[ -n "${PI_PROVIDER:-}" ]]; then
-    # override bare id: qualificato con PI_PROVIDER per non lanciare un bare id
+    # bare id override: qualified with PI_PROVIDER to avoid launching a bare id
     MODEL_ARGS=(--model "${PI_PROVIDER}/${MODEL_OVERRIDE}")
-    log "modello figlio (override bare id qualificato): ${PI_PROVIDER}/${MODEL_OVERRIDE}"
+    log "child model (qualified bare id override): ${PI_PROVIDER}/${MODEL_OVERRIDE}"
   else
-    # override non usabile: ignora con warning e prosegui con la catena env
-    log "override scorretto ignorato: '$MODEL_OVERRIDE' è un bare id (manca PI_PROVIDER) — uso la catena env"
+    # unusable override: ignore with a warning and continue with the env chain
+    log "invalid override ignored: '$MODEL_OVERRIDE' is a bare id (PI_PROVIDER missing) — using the env chain"
   fi
 fi
 if [[ ${#MODEL_ARGS[@]} -eq 0 ]]; then
   if [[ -n "${PI_PROVIDER:-}" && -n "${PI_MODEL:-}" ]]; then
     MODEL_ARGS=(--model "${PI_PROVIDER}/${PI_MODEL}")
-    log "modello figlio: ${PI_PROVIDER}/${PI_MODEL}"
+    log "child model: ${PI_PROVIDER}/${PI_MODEL}"
   elif [[ -n "${PI_DEFAULT_MODEL:-}" ]]; then
     MODEL_ARGS=(--model "$PI_DEFAULT_MODEL")
-    log "modello figlio: $PI_DEFAULT_MODEL"
+    log "child model: $PI_DEFAULT_MODEL"
   else
-    log "modello figlio: nessun modello dal parent, uso default globale"
+    log "child model: no model from parent, using global default"
   fi
 fi
 
-# ------------------------------------------------------- 3. stato su disco ----
+# ------------------------------------------------------- 3. state on disk ----
 STATE_JSON="$STATE_HOME/$TASK_ID.json"
 BRIEF_PATH="$STATE_HOME/tasks/$TASK_ID.brief.md"
 DONE_PATH="$STATE_HOME/$TASK_ID.done.json"
 NEEDS_INPUT_PATH="$STATE_HOME/$TASK_ID.needs-input.json"
 
 printf '%s\n' "$BRIEF_CONTENT" > "$BRIEF_PATH"
-# L3.5 group fields — GROUP_ID vuoto → usa TASK_ID (singolo), GROUP_SIZE placeholder 1
+# L3.5 group fields — empty GROUP_ID → use TASK_ID (single), GROUP_SIZE placeholder 1
 EFFECTIVE_GROUP_ID="${GROUP_ID:-$TASK_ID}"
 cat > "$STATE_JSON.tmp" <<EOF
 {
@@ -253,80 +252,80 @@ cat > "$STATE_JSON.tmp" <<EOF
   "groupFailPolicy": "${GROUP_FAIL_POLICY:-waitAll}"
 }
 EOF
-mv "$STATE_JSON.tmp" "$STATE_JSON"  # atomico: niente letture a metà da parte del watcher
-log "stato: $STATE_JSON"
+mv "$STATE_JSON.tmp" "$STATE_JSON"  # atomic: no mid-reads by the watcher
+log "state: $STATE_JSON"
 if [[ -n "${GROUP_ID:-}" ]]; then log "gruppo: $GROUP_ID ($GROUP_MODE)"; fi
 
-# ------------------------------------------------------- 4. tab herdr (sidebar-only) ----
-# I figli girano nel workspace "fleet" dedicato (mai nel tab del capitano) in un
-# tab `--no-focus`: non rubano il focus, NON occupano spazio nel tab della chat e
-# NON appaiono nella tab bar del capitano — sono visibili SOLO nella sidebar
-# agents di herdr a sinistra (stato roll-up per workspace) finché non li si apre.
-# close_tab chiude tab + pane (il tab del workspace fleet è dedicato al task;
-# il tab del capitano non viene MAI toccato).
+# ------------------------------------------------------- 4. herdr tab (sidebar-only) ----
+# Children run in the dedicated "fleet" workspace (never in the captain's tab) in a
+# `--no-focus` tab: they don't steal focus, take no room in the chat tab and
+# don't appear in the captain's tab bar — they are visible ONLY in herdr's agents
+# sidebar on the left (roll-up state per workspace) until you open them.
+# close_tab closes tab + pane (the fleet workspace tab is dedicated to the task;
+# the captain's tab is NEVER touched).
 close_tab() {
   if [[ -n "$TAB_ID" ]]; then
-    herdr_cli tab close "$TAB_ID" >/dev/null 2>&1 && log "tab chiuso" || log "tab già chiuso"
+    herdr_cli tab close "$TAB_ID" >/dev/null 2>&1 && log "tab closed" || log "tab already closed"
     TAB_ID=""
   fi
   if [[ -n "$PANE_ID" ]]; then
-    herdr_cli pane close "$PANE_ID" >/dev/null 2>&1 && log "pane chiuso" || log "pane già chiuso"
+    herdr_cli pane close "$PANE_ID" >/dev/null 2>&1 && log "pane closed" || log "pane already closed"
     PANE_ID=""
   fi
 }
 WORKSPACE="$(resolve_fleet_workspace)"
-[[ -z "$WORKSPACE" ]] && { herr "impossibile creare/risolvere la workspace fleet"; fail_task "workspace fleet non risolvibile"; release_worktree; exit 1; }
-log "workspace fleet: $WORKSPACE"
+[[ -z "$WORKSPACE" ]] && { herr "unable to create/resolve the fleet workspace"; fail_task "fleet workspace not resolvable"; release_worktree; exit 1; }
+log "fleet workspace: $WORKSPACE"
 TB_OUT="$(herdr_cli tab create --workspace "$WORKSPACE" --cwd "$TASK_CWD" --label "$TASK_ID" --no-focus)"
 TAB_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)"
 PANE_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)"
-[[ -z "$TAB_ID" || -z "$PANE_ID" ]] && { herr "tab create senza tab/pane id: $TB_OUT"; fail_task "tab create fallito: $TB_OUT"; release_worktree; exit 1; }
-log "tab fleet (solo sidebar): $TAB_ID | pane: $PANE_ID"
+[[ -z "$TAB_ID" || -z "$PANE_ID" ]] && { herr "tab create without tab/pane id: $TB_OUT"; fail_task "tab create failed: $TB_OUT"; release_worktree; exit 1; }
+log "fleet tab (sidebar only): $TAB_ID | pane: $PANE_ID"
 add_pane_ids
 
-# Cleanup su errore: SEMPRE pane/tab prima di treehouse return (return uccide i
-# processi nella worktree, compresa la shell del pane).
+# Error cleanup: ALWAYS pane/tab before treehouse return (return kills
+# the processes in the worktree, including the pane shell).
 trap 'log "interrotto: pulisco..."; close_tab; release_worktree; exit 130' INT TERM
 
-# ------------------------------------------------------- 5. avvia pi nel pane ----
-# Nome agente UNICO per task (herdr rifiuta nomi duplicati: agent_name_taken) e
-# retry sulle race transitorie (agent_pane_busy: pane non ancora shell disponibile
-# subito dopo il tab create, tipico con lanci paralleli ravvicinati).
+# ------------------------------------------------------- 5. start pi in the pane ----
+# UNIQUE agent name per task (herdr rejects duplicate names: agent_name_taken) and
+# retry on transient races (agent_pane_busy: pane shell not yet available right
+# after tab create, typical with closely-spaced parallel launches).
 AS_OUT=""
 OK=0
 for ((try = 1; try <= 4; try++)); do
   AS_OUT="$(herdr_cli agent start "$AGENT_NAME" --kind pi --pane "$PANE_ID" -- "${MODEL_ARGS[@]}")"
   if [[ $? -eq 0 ]]; then OK=1; break; fi
-  herr "agent start: tentativo $try/4 fallito: ${AS_OUT:0:160}"
+  herr "agent start: attempt $try/4 failed: ${AS_OUT:0:160}"
   sleep 3
 done
 if [[ $OK -ne 1 ]]; then
-  herr "agent start fallito ($AGENT_NAME): $AS_OUT"
-  fail_task "agent start fallito: ${AS_OUT:0:200}"
+  herr "agent start failed ($AGENT_NAME): $AS_OUT"
+  fail_task "agent start failed: ${AS_OUT:0:200}"
   close_tab
   release_worktree
   exit 1
 fi
-log "pi avviato nel pane (readiness ok)"
+log "pi started in the pane (readiness ok)"
 
-# Attende che pi sia davvero pronto (idle al prompt) PRIMA del prompt:
-# il prompt inviato troppo presto va nel buffer e si perde (race "typing too early").
+# Waits for pi to actually be ready (idle at prompt) BEFORE the prompt:
+# a prompt sent too early goes into the buffer and is lost (race "typing too early").
 herdr_cli agent wait "$PANE_ID" --until idle >/dev/null 2>&1 \
   || log "wait idle non confermato (procedo comunque)"
 sleep 2
 
-# ------------------------------------------------------- 6. brief al figlio ----
-# Task scout (--kind scout): deliverable = report.md, niente commit/push/PR;
-# la regola extra entra nel CHILD_PROMPT solo quando KIND == scout.
+# ------------------------------------------------------- 6. brief to the child ----
+# Scout task (--kind scout): deliverable = report.md, no commit/push/PR;
+# the extra rule enters the CHILD_PROMPT only when KIND == scout.
 SCOUT_RULES=""
 if [[ "$KIND" == "scout" ]]; then
-  SCOUT_RULES="- SEI UN TASK SCOUT (solo report). Il tuo deliverable è un file \`report.md\` nella root del cwd con il risultato completo dell'analisi. NON committare, NON fare push, NON aprire PR. Nel done-marker aggiungi \"reportPath\":\"report.md\" (percorso relativo)."
-  log "kind: scout (solo report, nessun commit/PR)"
+  SCOUT_RULES="- YOU ARE A SCOUT TASK (report only). Your deliverable is a \`report.md\` file at the root of the cwd with the complete result of the analysis. Do NOT commit, do NOT push, do NOT open a PR. In the done-marker add \"reportPath\":\"report.md\" (relative path)."
+  log "kind: scout (report only, no commit/PR)"
 fi
-# T-011 gate meccanico: sezione GATE condizionale (solo quando --gate, cioè
-# posture no-mistakes E progetto con gate.yaml). Il figlio posssiede il loop
-# self-fix (modello firstmate: il worker possiede run/fix). L'anti-frode è nel
-# launcher (sezione 7.5): il figlio NON può barare sul verde finale.
+# T-011 mechanical gate: conditional GATE section (only when --gate, i.e.
+# no-mistakes posture AND project with gate.yaml). The child owns the self-fix
+# loop (firstmate model: the worker owns run/fix). The anti-fraud is in the
+# launcher (section 7.5): the child CANNOT cheat on the final green.
 GATEROUNDS_MAX="5"
 if [[ "$GATE_ACTIVE" == "1" ]]; then
   GATE_YAML_CFG="$TASK_CWD/gate.yaml"
@@ -335,47 +334,47 @@ if [[ "$GATE_ACTIVE" == "1" ]]; then
     rounds="$(sed -n 's/^[[:space:]]*maxRounds:[[:space:]]*\([0-9]*\).*/\1/p' "$GATE_YAML_CFG" | head -1)"
     [[ -n "$rounds" ]] && GATEROUNDS_MAX="$rounds"
   fi
-  GATE_RULES="GATE: il progetto ha un gate deterministico ($GATE_RUN). Dopo l'implementazione: 1) esegui il gate eseguendo \`bash \"$GATE_RUN\" --report gate/report.json\` nella root del cwd (crea la dir gate/ se serve); 2) se rosso, leggi il report per-step e fixa SOLO ciò che il report segnala (niente scope creep), poi ri-esegui il gate (max ${GATEROUNDS_MAX} round); 3) MAI scrivere il done-marker con gate rosso — se i round finiscono su rosso scrivi il done-marker con status \"failed\" e la summary con dentro il contenuto del report; 4) a verde metti nel done-marker \`gate:{passed:true,rounds:N,reportPath:\"gate/report.json\"}\`; NON aprire tu PR/merge: se il progetto lo configura, lo fa il sistema."
-  log "gate: attivo (maxRounds $GATEROUNDS_MAX)"
+  GATE_RULES="GATE: the project has a deterministic gate ($GATE_RUN). After the implementation: 1) run the gate by executing \`bash \"$GATE_RUN\" --report gate/report.json\` at the root of the cwd (create the gate/ dir if needed); 2) if red, read the per-step report and fix ONLY what the report flags (no scope creep), then re-run the gate (max ${GATEROUNDS_MAX} rounds); 3) NEVER write the done-marker with a red gate — if the rounds end red, write the done-marker with status \"failed\" and the summary containing the report content; 4) on green put \`gate:{passed:true,rounds:N,reportPath:\"gate/report.json\"}\` in the done-marker; do NOT open PR/merge yourself: if the project configures it, the system does it."
+  log "gate: active (maxRounds $GATEROUNDS_MAX)"
 else
   GATE_RULES=""
 fi
-CHILD_PROMPT="Sei un sub-agent fleet (task $TASK_ID). Leggi il brief in:
+CHILD_PROMPT="You are a fleet sub-agent (task $TASK_ID). Read the brief in:
 $BRIEF_PATH
 
-Regole:
-- Esegui il task dentro il cwd corrente. NON modificare nulla fuori dal cwd.
-- La worktree è in stato detached HEAD: se devi committare, crea prima un branch (git switch -c fleet/<taskid>-<slug>). NON committare mai in detached HEAD o sul branch main.
-- Non interrompere l'utente: lavora in autonomia fino alla fine.
-- Se ti serve un input dal capitano, scrivi il file $NEEDS_INPUT_PATH con {\"question\":\"...\",\"taskState\":\"needs_input\"} e FERMATI (niente domande in chat).
-- Il capitano può inviarti messaggi (fleet_steer): li trovi nella directory $STATE_HOME/$TASK_ID.inbox/ (file <seq>.json). Dopo aver LETTO e applicato un messaggio, crea il file ack $STATE_HOME/$TASK_ID.inbox/<seq>.acked (es. : > <path>). Se non acki, il messaggio verrà ripresentato e poi il capitano verrà avvisato.
-- Quando hai finito, scrivi il file $DONE_PATH in formato JSON:
+Rules:
+- Run the task inside the current cwd. Do NOT modify anything outside the cwd.
+- The worktree is in detached HEAD state: if you need to commit, first create a branch (git switch -c fleet/<taskid>-<slug>). NEVER commit on detached HEAD or on the main branch.
+- Do not interrupt the user: work autonomously to the end.
+- If you need input from the captain, write the file $NEEDS_INPUT_PATH with {\"question\":\"...\",\"taskState\":\"needs_input\"} and STOP (no questions in chat).
+- The captain can send you messages (fleet_steer): you find them in the directory $STATE_HOME/$TASK_ID.inbox/ (files <seq>.json). After READING and applying a message, create the ack file $STATE_HOME/$TASK_ID.inbox/<seq>.acked (e.g. : > <path>). If you don't ack, the message will be re-delivered and then the captain will be notified.
+- When you are done, write the file $DONE_PATH in JSON format:
 {\"status\":\"done\",\"summary\":\"...\",\"changedFiles\":[\"rel/path\"]}
-(su errore impedibile: {\"status\":\"failed\",\"summary\":\"...motivo...\"})
-- REGOLA CRITICA sulla summary: NON è un verbale di attività. Deve contenere IL RISULTATO richiesto dal brief (punti, elenchi, risposte, decisioni), completo e autocontenuto. Chi la legge (il capitano) deve capire l'esito SENZA aprire altri file. Una riga tipo \"fatto / letto i file\" è INSUFFICIENTE: riporta nel dettaglio ciò che il brief ti chiede di produrre.
-- REGOLA DI FORMATTAZIONE: scrivi la summary in Markdown strutturato — intestazioni, bullet, liste numerate, tabelle dove ha senso. NIENTE muri di prosa continua: se il testo supera poche righe, spezzalo in sezioni con titoli. L'output leggibile è parte del deliverable.
-- Poi termina il turno senza chiedere nulla (questo script chiude il tab e pulisce).
+(on an unpreventable error: {\"status\":\"failed\",\"summary\":\"...reason...\"})
+- CRITICAL RULE about the summary: it is NOT an activity log. It must contain THE RESULT required by the brief (points, lists, answers, decisions), complete and self-contained. Whoever reads it (the captain) must understand the outcome WITHOUT opening other files. A line like \"done / read the files\" is INSUFFICIENT: report in detail what the brief asks you to produce.
+- FORMATTING RULE: write the summary in structured Markdown — headings, bullets, numbered lists, tables where it makes sense. NO walls of continuous prose: if the text exceeds a few lines, split it into titled sections. Readable output is part of the deliverable.
+- Then end the turn without asking anything (this script closes the tab and cleans up).
 ${SCOUT_RULES}
 ${GATE_RULES}
 
 DELIVERY POSTURE: $DELIVERY_POSTURE
-Significato:
-- no-mistakes — committa solo con test/CI verde; mai push; consegna solo su richiesta esplicita del capitano.
-- direct-PR — al termine, se il brief lo autorizza, prepara e APRE la PR (gh pr create) dal branch fleet/<id>; non merge mai.
-- local-only — committa localmente; niente push, niente PR; il capitano decide dopo.
-- yolo — come local-only, ma autorizza push del branch e merge+PR solo se il brief lo chiede ESPRESSAMENTE; mai autonomo senza brief.
-Rispettala durante la consegna; se nel brief non è richiesto nulla di esplicito, comportati secondo la posture. NON eseguire mai push/merge non autorizzati.
+Meaning:
+- no-mistakes — commit only with tests/CI green; never push; deliver only on explicit captain request.
+- direct-PR — at the end, if the brief authorizes it, prepare and OPEN the PR (gh pr create) from the branch fleet/<id>; never merge.
+- local-only — commit locally; no push, no PR; the captain decides later.
+- yolo — like local-only, but authorizes branch push and merge+PR only if the brief explicitly asks for it; never autonomously without a brief.
+Respect it during delivery; if the brief asks for nothing explicit, behave according to the posture. NEVER run unauthorized push/merge.
 
-Il task è: $BRIEF_CONTENT"
+The task is: $BRIEF_CONTENT"
 
 herdr_cli agent prompt "$PANE_ID" "$CHILD_PROMPT" >/dev/null \
-  || { herr "invio brief fallito"; fail_task "invio brief al figlio fallito"; close_tab; release_worktree; exit 1; }
-log "brief consegnato al figlio"
+  || { herr "brief delivery failed"; fail_task "brief delivery to child failed"; close_tab; release_worktree; exit 1; }
+log "brief delivered to the child"
 
-# ------------------------------------------------------- 7. attesa done-marker ----
-# Liveness: se il figlio (agent nel pane) sparisce senza aver scritto marker
-# (crash, tab chiuso, sessione terminata dal capitano), NON restare in attesa
-# fino al timeout: dopo ~30s senza pane attivo dichiara failed con motivo.
+# ------------------------------------------------------- 7. done-marker wait ----
+# Liveness: if the child (agent in the pane) disappears without writing a marker
+# (crash, closed tab, session ended by the captain), do NOT keep waiting
+# until the timeout: after ~30s without an active pane declare failed with reason.
 agent_alive() {
   local out
   out="$(herdr_cli agent list 2>/dev/null)" || return 2   # herdr irraggiungibile: ignora
@@ -384,18 +383,18 @@ agent_alive() {
 }
 
 set_state running
-log "in attesa del completamento (timeout ${TIMEOUT_MIN}min)..."
+log "waiting for completion (timeout ${TIMEOUT_MIN}min)..."
 DEADLINE=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
 LAST_LIVE=$(date +%s)
 MISS=0
 while :; do
   if [[ -f "$DONE_PATH" ]]; then
     RESULT="$(cat "$DONE_PATH")"
-    # Il done.json può arrivare con summary multi-riga con newline LETTERALI
-    # (non-escaped), quindi JSON non valido: parse fallback best-effort → done
-    # con summary raw, così lo stato non resta mai bloccato su 'running'.
+    # The done.json can arrive with a multi-line summary with LITERAL newlines
+    # (non-escaped), hence invalid JSON: best-effort fallback parse → done
+    # with the raw summary, so the state never gets stuck on 'running'.
     if ! printf '%s' "$RESULT" | jq -e . >/dev/null 2>&1; then
-      log "done.json non-JSON valido (probabili newline letterali nella summary): fallback best-effort"
+      log "done.json not valid JSON (likely literal newlines in the summary): best-effort fallback"
       STATUS="done"; SUMMARY="$RESULT"; FILES="[]"; REPORTPATH=""; CHILD_GATE_ROUNDS=0
     else
       STATUS="$(printf '%s' "$RESULT" | jq -r '.status // "failed"')"
@@ -404,13 +403,13 @@ while :; do
       REPORTPATH="$(printf '%s' "$RESULT" | jq -r '.reportPath // ""')"
       CHILD_GATE_ROUNDS="$(printf '%s' "$RESULT" | jq -r '.gate.rounds // 0' 2>/dev/null || echo 0)"
     fi
-    log "completato: $STATUS"
+    log "completed: $STATUS"
     printf '
-=== RISULTATO TASK %s ===
+=== TASK RESULT %s ===
 %s
-=== FINE ===
+=== END ===
 ' "$TASK_ID" "$RESULT"
-    # scrive stato + risultato nello state json (il capitano lo vede in fleet_status)
+    # writes state + result into the state json (the captain sees it in fleet_status)
     jq --arg st "$STATUS" --arg done "$(date +%s)000" --arg sum "$SUMMARY" --argjson files "$FILES" --arg rp "$REPORTPATH" \
       '.state=$st | .doneAt=($done|tonumber) | .summary=$sum | .changedFiles=$files | if $rp != "" then .reportPath=$rp else . end' "$STATE_JSON" \
       > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
@@ -418,12 +417,12 @@ while :; do
     break
   fi
   if [[ -f "$NEEDS_INPUT_PATH" ]]; then
-    log "il figlio CHIEDE INPUT (tab lasciato aperto, watcher resta in attesa)"
+    log "the child ASKS FOR INPUT (tab left open, watcher keeps waiting)"
     set_state needs_input
     rm -f "$NEEDS_INPUT_PATH"
   fi
   if [[ -f "$STATE_HOME/$TASK_ID.abort" ]]; then
-    log "abort richiesto dal capitano"
+    log "abort requested by the captain"
     set_state aborted
     close_tab
     release_worktree
@@ -442,12 +441,12 @@ while :; do
     agent_alive
     case $? in
       0) MISS=0 ;;
-      1) MISS=$((MISS + 1)); log "figlio non rilevato nel pane ($MISS/2)" ;;
-      *) : ;;                                        # herdr giù: non contare
+      1) MISS=$((MISS + 1)); log "child not detected in the pane ($MISS/2)" ;;
+      *) : ;;                                        # herdr down: do not count
     esac
     if (( MISS >= 2 )); then
-      herr "il figlio è terminato senza done-marker (agent non più rilevato): chiudo il task"
-      jq --arg done "$(date +%s)000" --arg sum "Il figlio è terminato senza scrivere il done-marker (agent/pane non più presente)." \
+      herr "the child ended without a done-marker (agent no longer detected): closing the task"
+      jq --arg done "$(date +%s)000" --arg sum "The child ended without writing the done-marker (agent/pane no longer present)." \
         '.state="failed" | .doneAt=($done|tonumber) | .summary=$sum' "$STATE_JSON" \
         > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
       close_tab
@@ -458,14 +457,14 @@ while :; do
   sleep 2
 done
 
-# ------------------------------------------- 7.5 gate anti-frode (T-011) ----
-# Il launcher riesegue LUI STESSO il gate sulla worktree allo stato finale
-# (HEAD = commit finale del figlio — dopo il done-marker, prima di finalizzare).
-# Anti-frode: il figlio non può barare sul verde. Merge MAI automatico (F0 #6).
-# Casistiche:
-#   rosso/errore            → task failed con il report; tab chiuso; NIENTE PR.
-#   verde + autoPr:true     → gh-axi pr create; prUrl + gate nello state json.
-#   verde + autoPr:false    → done senza PR (gate nello state json).
+# ------------------------------------------- 7.5 anti-fraud gate (T-011) ----
+# The launcher re-runs the gate ITSELF on the worktree at the final state
+# (HEAD = the child's final commit — after the done-marker, before finalizing).
+# Anti-fraud: the child cannot cheat on the green. Merge NEVER automatic (F0 #6).
+# Cases:
+#   red/error               → task failed with the report; tab closed; NO PR.
+#   green + autoPr:true    → gh-axi pr create; prUrl + gate in the state json.
+#   green + autoPr:false   → done without PR (gate in the state json).
 gh_axi() {
   if command -v gh-axi >/dev/null 2>&1; then
     gh-axi "$@"
@@ -486,7 +485,7 @@ run_pr_create() {
       [[ -z "$pr" ]] && pr="$(printf '%s' "$out" | head -1)"   # fallback: output grezzo
       echo "$pr"; return 0
     fi
-    log "gh-axi pr create: tentativo $try/3 fallito (rc=$rc): ${out:0:140}"
+    log "gh-axi pr create: attempt $try/3 failed (rc=$rc): ${out:0:140}"
     sleep 3
   done
   echo ""
@@ -502,44 +501,44 @@ if [[ "$GATE_ACTIVE" == "1" ]]; then
   if [[ -f "$TASK_CWD/$GATE_REPORT_PATH" ]]; then
     GATE_OVERALL="$(jq -r '.overall // "red"' "$TASK_CWD/$GATE_REPORT_PATH" 2>/dev/null || echo red)"
   else
-    herr "gate: report mancante (${TASK_CWD}/${GATE_REPORT_PATH}) — tratto come rosso"
+    herr "gate: missing report (${TASK_CWD}/${GATE_REPORT_PATH}) — treated as red"
   fi
   [[ "$GATE_RC" -eq 0 && "$GATE_OVERALL" == "green" ]] && GATE_PASSED=1 || GATE_PASSED=0
   GATE_ROUNDS="${CHILD_GATE_ROUNDS:-0}"
   GATE_OBJ="$(jq -nc --argjson p "$GATE_PASSED" --argjson r "$GATE_ROUNDS" --arg rp "$GATE_REPORT_PATH" \
     '{passed:($p==1), rounds:$r, reportPath:$rp}')"
   if [[ "$GATE_PASSED" -eq 1 ]]; then
-    log "gate verde (rc=$GATE_RC, overall=$GATE_OVERALL)"
+    log "gate green (rc=$GATE_RC, overall=$GATE_OVERALL)"
     if [[ "$AUTO_PR" == "true" ]]; then
       PR_HEAD="$(git -C "$TASK_CWD" symbolic-ref --short HEAD 2>/dev/null || git -C "$TASK_CWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-      log "gate verde + autoPr:true → creo PR (head=$PR_HEAD)"
+      log "gate green + autoPr:true → creating PR (head=$PR_HEAD)"
       PR_URL="$(run_pr_create "$PR_HEAD" "$TASK_CWD/$GATE_REPORT_PATH" "$TITLE")"
       if [[ -n "$PR_URL" ]]; then
         jq --argjson gate "$GATE_OBJ" --arg pr "$PR_URL" \
           '.gate=$gate | .prUrl=$pr' "$STATE_JSON" \
           > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
-        log "PR creata: $PR_URL (merge MAI automatico — autorità = capitano)"
+        log "PR created: $PR_URL (merge NEVER automatic — authority = captain)"
       else
-        herr "gate verde ma creazione PR fallita (gh-axi): task failed, MAI PR a metà"
+        herr "green gate but PR creation failed (gh-axi): task failed, never a half PR"
         jq --arg done "$(date +%s)000" --argjson gate "$GATE_OBJ" \
-          --arg sum "Gate verde ma creazione PR automatica fallita (gh-axi non ha risposto). Vedi report: $GATE_REPORT_PATH." \
+          --arg sum "Green gate but automatic PR creation failed (gh-axi did not respond). See report: $GATE_REPORT_PATH." \
           '.state="failed" | .doneAt=($done|tonumber) | .gate=$gate | .summary=$sum' "$STATE_JSON" \
           > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
       fi
     else
       jq --argjson gate "$GATE_OBJ" '.gate=$gate' "$STATE_JSON" \
         > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
-      log "gate verde, autoPr=false → done senza PR"
+      log "gate green, autoPr=false → done without PR"
     fi
   else
-    herr "gate rosso all'anti-frode (rc=$GATE_RC, overall=$GATE_OVERALL): task failed, NIENTE PR"
+    herr "gate red at anti-fraud (rc=$GATE_RC, overall=$GATE_OVERALL): task failed, NO PR"
     jq --arg done "$(date +%s)000" --argjson gate "$GATE_OBJ" \
-      --arg sum "Gate (anti-frode launcher) ROSSO dopo il done-marker del figlio: rc=$GATE_RC overall=$GATE_OVERALL. Report: $GATE_REPORT_PATH. PR NON creata." \
+      --arg sum "Gate (launcher anti-fraud) RED after the child's done-marker: rc=$GATE_RC overall=$GATE_OVERALL. Report: $GATE_REPORT_PATH. PR NOT created." \
       '.state="failed" | .doneAt=($done|tonumber) | .gate=$gate | .summary=$sum' "$STATE_JSON" \
       > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
   fi
 else
-  log "gate non attivo (no --gate): nessuna verifica finale"
+  log "gate not active (no --gate): no final verification"
 fi
 
 # ------------------------------------------------------- 8. cleanup ----

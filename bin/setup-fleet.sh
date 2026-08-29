@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# pi-fleet · setup su una nuova macchina.
+# pi-fleet · setup on a new machine.
 #
-# Fa: check prerequisiti, installa l'estensione (pi install .),
-# scrive ~/.pi/AGENTS.md dalla policy globale (backup del file esistente),
-# configura treehouse per i progetti in FLEET_PROJECTS_DIR,
-# scrive la config sub-agent (timeout 6h + waitTool), e stampa i passi finali.
+# Does: prerequisites check, extension install (pi install .),
+# writes ~/.pi/AGENTS.md from the global policy (backing up any existing file),
+# configures treehouse for the projects in FLEET_PROJECTS_DIR,
+# writes the sub-agent config (6h timeout + waitTool), and prints the final steps.
 #
-# Uso:  ./bin/setup-fleet.sh
+# Usage:  ./bin/setup-fleet.sh
 set -u
 
 PACKAGE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,125 +14,125 @@ HOME_AGENTS="$HOME/.pi/AGENTS.md"
 
 say()  { printf '\033[1;32m[fleet] %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[fleet] WARN %s\033[0m\n' "$*"; }
-err()  { printf '\033[1;31m[fleet] ERRORE %s\033[0m\n' "$*" >&2; }
+err()  { printf '\033[1;31m[fleet] ERROR %s\033[0m\n' "$*" >&2; }
 
 echo
 say "pi-fleet setup — $(basename "$PACKAGE_DIR")"
 
-# ------------------------------------------------------------- prerequisiti ----
+# ------------------------------------------------------------- prerequisites ----
 echo
-say "1/5 · check prerequisiti"
+say "1/5 · prerequisite check"
 missing=""
 for cmd in pi herdr treehouse jq python3; do
   if command -v "$cmd" >/dev/null 2>&1; then
     echo "   ✓ $cmd: $(command -v "$cmd")"
   else
-    echo "   ✗ $cmd: MANCANTE"
+    echo "   ✗ $cmd: MISSING"
     missing="$missing $cmd"
   fi
 done
 if [[ -n "$missing" ]]; then
   echo
-  err "prerequisiti mancanti:$missing — installali prima di continuare (vedi README.md)."
+  err "missing prerequisites:$missing — install them before continuing (see README.md)."
   exit 1
 fi
 
-# T-011: gh-axi per la PR automatica del gate — OPZIONALE, auto-install se assente
+# T-011: gh-axi for the gate's automatic PR — OPTIONAL, auto-install if absent
 if command -v gh-axi >/dev/null 2>&1; then
-  echo "   ✓ gh-axi: $(command -v gh-axi) (PR automatica del gate T-011)"
+  echo "   ✓ gh-axi: $(command -v gh-axi) (gate T-011 automatic PR)"
 else
-  echo "   … gh-axi: assente — provo a installarlo (npm i -g gh-axi)"
+  echo "   … gh-axi: absent — trying to install it (npm i -g gh-axi)"
   if command -v npm >/dev/null 2>&1 && npm i -g gh-axi >/dev/null 2>&1; then
-    echo "   ✓ gh-axi installato: $(command -v gh-axi)"
+    echo "   ✓ gh-axi installed: $(command -v gh-axi)"
   else
-    warn "gh-axi non installato: il gate di consegna (T-011) resta attivo ma la PR automatica (autoPr: true) non è possibile. Installa con: npm i -g gh-axi"
+    warn "gh-axi not installed: the delivery gate (T-011) stays active but the automatic PR (autoPr: true) is not possible. Install with: npm i -g gh-axi"
   fi
 fi
-# T-011: il gate e l'engine no-mistakes sono OPZIONALI — solo progetti con gate.yaml
-# e posture no-mistakes; i comandi no-mistakes (impacted-checks/resolve-check) nei
-# checks sono facoltativi.
-echo "   ℹ  gate di consegna (T-011): OPZIONALE — attivo solo per progetti con gate.yaml e"
-echo "      posture no-mistakes; l'engine no-mistakes nei checks (impacted-checks/resolve-check) è opzionale."
+# T-011: the gate and the no-mistakes engine are OPTIONAL — only for projects with gate.yaml
+# and no-mistakes posture; the no-mistakes commands (impacted-checks/resolve-check) in the
+# checks are optional.
+echo "   ℹ  delivery gate (T-011): OPTIONAL — active only for projects with gate.yaml and"
+echo "      no-mistakes posture; the no-mistakes engine in the checks (impacted-checks/resolve-check) is optional."
 
 # herdr attivo?
 if ! herdr workspace list >/dev/null 2>&1; then
-  warn "herdr non raggiungibile (socket?). Avvialo prima; il setup prosegue comunque."
+  warn "herdr not reachable (socket?). Start it first; setup continues anyway."
 fi
 
-# ------------------------------------------------------- pi install estensione ----
+# ------------------------------------------------------- pi install extension ----
 echo
-say "2/5 · installa l'estensione pi-fleet (pi install .)"
-( cd "$PACKAGE_DIR" && pi install . ) || { err "pi install . fallita"; exit 1; }
+say "2/5 · install the pi-fleet extension (pi install .)"
+( cd "$PACKAGE_DIR" && pi install . ) || { err "pi install . failed"; exit 1; }
 
-# --------------------------------------------------------- AGENTS.md globale ----
+# --------------------------------------------------------- global AGENTS.md ----
 echo
-say "3/5 · ~/.pi/AGENTS.md (policy delega pi-fleet)"
+say "3/5 · ~/.pi/AGENTS.md (pi-fleet delegation policy)"
 if [[ -f "$HOME_AGENTS" ]]; then
-  cp "$HOME_AGENTS" "$HOME_AGENTS.bak" && echo "   backup del file esistente → $HOME_AGENTS.bak"
+  cp "$HOME_AGENTS" "$HOME_AGENTS.bak" && echo "   backup of the existing file → $HOME_AGENTS.bak"
 fi
 cp "$PACKAGE_DIR/templates/AGENTS.global.md" "$HOME_AGENTS" \
-  && echo "   scritto: $HOME_AGENTS (policy: delega automatica, anti-polling, wake solo failed/needs_input)"
+  && echo "   written: $HOME_AGENTS (policy: automatic delegation, anti-polling, wake only on failed/needs_input)"
 
 # ------------------------------------------------- treehouse auto-config ----
 echo
-say "4/5 · configura treehouse per i progetti in FLEET_PROJECTS_DIR"
+say "4/5 · configure treehouse for the projects in FLEET_PROJECTS_DIR"
 configure_treehouse_projects() {
   local root="${FLEET_PROJECTS_DIR:-}"
   if [[ -z "$root" ]]; then
-    warn "FLEET_PROJECTS_DIR non impostato — salto auto-config treehouse."
-    echo "       Imposta: export FLEET_PROJECTS_DIR=~/projects  (nel tuo ~/.zshrc o ~/.bashrc)"
-    echo "       Poi riavvia questo script o esegui manualmente:"
+    warn "FLEET_PROJECTS_DIR not set — skipping treehouse auto-config."
+    echo "       Set: export FLEET_PROJECTS_DIR=~/projects  (in your ~/.zshrc or ~/.bashrc)"
+    echo "       Then restart this script or run manually:"
     echo "         cd <repo> && treehouse config --root ~/.treehouse && treehouse add --target ."
     return 0
   fi
-  # espandi ~ se presente
+  # expand ~ if present
   root="${root/#\~/$HOME}"
   if [[ ! -d "$root" ]]; then
-    warn "FLEET_PROJECTS_DIR non esiste: $root — salto."
+    warn "FLEET_PROJECTS_DIR does not exist: $root — skipping."
     return 0
   fi
   local count=0
   for dir in "$root"/*/; do
     [[ -d "$dir/.git" ]] || continue
-    echo "   configuro treehouse per: $(basename "$dir")"
+    echo "   configuring treehouse for: $(basename "$dir")"
     ( cd "$dir" && treehouse config --root ~/.treehouse && treehouse add --target . ) \
-      && ((count++)) || warn "   fallito per $(basename "$dir")"
+      && ((count++)) || warn "   failed for $(basename "$dir")"
   done
   if [[ $count -eq 0 ]]; then
-    warn "nessun repo git trovato in $root"
+    warn "no git repo found in $root"
   else
-    echo "   ✓ $count repo configurati"
+    echo "   ✓ $count repos configured"
   fi
 }
 configure_treehouse_projects
 
-# ------------------------------------------------- config subagent timeout (6h) ----
+# ------------------------------------------------- subagent timeout config (6h) ----
 echo
-say "5/5 · config sub-agent timeout 6h + waitTool"
+say "5/5 · sub-agent config 6h timeout + waitTool"
 SUB_CFG="$HOME/.pi/agent/extensions/subagent/config.json"
 mkdir -p "$(dirname "$SUB_CFG")"
 if [[ -f "$SUB_CFG" ]]; then
-  echo "   già presente, non tocco: $SUB_CFG"
+  echo "   already present, not touching: $SUB_CFG"
 else
   cp "$PACKAGE_DIR/templates/subagents.config.json" "$SUB_CFG" \
-    && echo "   scritto: $SUB_CFG"
+    && echo "   written: $SUB_CFG"
 fi
 
 echo
 echo "──────────────────────────────────────────────────────────────────"
-say "FATTO. Ultimi passi manuali:"
+say "DONE. Final manual steps:"
 echo
-echo "  1. Avvia herdr (se non l'hai fatto): herdr"
-echo "  2. (Già fatto se FLEET_PROJECTS_DIR era impostato) Altrimenti configura treehouse manualmente:"
+echo "  1. Start herdr (if you haven't): herdr"
+echo "  2. (Already done if FLEET_PROJECTS_DIR was set) Otherwise configure treehouse manually:"
 echo "       cd <repo-path> && treehouse config --root ~/.treehouse && treehouse add --target ."
 echo "  3. Check the default model in ~/.pi/agent/settings.json"
 echo "     if needed (children INHERIT the active model at launch)."
 echo "  4. RESTART pi (extension loads at startup)."
 echo "  5. Try:  look at my-project and give me a README summary"
 echo
-echo "  Gate di consegna (T-011, opzionale):"
-echo "    - Per attivarlo in un progetto: crea gate.yaml nella root (vedi README.md §Gate)."
-echo "    - La PR automatica (autoPr: true) richiede gh-axi e un remote GitHub sul repo."
+echo "  Delivery gate (T-011, optional):"
+echo "    - To activate it in a project: create gate.yaml at the root (see README.md §Gate)."
+echo "    - The automatic PR (autoPr: true) requires gh-axi and a GitHub remote on the repo."
 echo
-echo "  Log di debug: ~/.pi/fleet/<task-id>.log   · stato: ~/.pi/fleet/"
+echo "  Debug log: ~/.pi/fleet/<task-id>.log   · state: ~/.pi/fleet/"
 echo "──────────────────────────────────────────────────────────────────"

@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# pi-fleet · wake drain — svuota la coda durabile dei wake (~/.pi/fleet/.wake-queue)
-# L3.5 group barrier: mostra anche STATE/.wake-groups/*.json come GROUP pending
+# pi-fleet · wake drain — drains the durable wake queue (~/.pi/fleet/.wake-queue)
+# L3.5 group barrier: also shows STATE/.wake-groups/*.json as GROUP pending
 #
-# Queue record formato (scritto da fleet-watch.sh):
+# Queue record format (written by fleet-watch.sh):
 #   {"seq": 1234567890123, "taskId": "abc-123", "reason": "signal: abc.done", "createdAt": 1724800000}
-# Ogni record è un file JSON in $QUEUE/*.json ordinato per seq numerica.
+# Each record is a JSON file in $QUEUE/*.json sorted by numeric seq.
 #
-# Modalità:
-#   (default drain)                lista tutti i record ordinati, stampa WAKE <seq> <taskId> <reason>
-#   --ack-through <SEQ>            cancella record con seq <= SEQ (dopo consegna in chat)
-#   --recovery-generation <GEN>    verifica generation (compatibilità, warning se non matcha)
-#   --json                         output JSON array invece di linee
-#   --count                        stampa solo count di pending
+# Modes:
+#   (default drain)                list all records sorted, print WAKE <seq> <taskId> <reason>
+#   --ack-through <SEQ>            delete records with seq <= SEQ (after chat delivery)
+#   --recovery-generation <GEN>    verify generation (compatibility, warning if mismatch)
+#   --json                         JSON array output instead of lines
+#   --count                        print only the pending count
 #
-# Idempotente e safe per chiamate concorrenti (extension + manuale) via mkdir lock.
+# Idempotent and safe for concurrent calls (extension + manual) via mkdir lock.
 set -u
 
 STATE="${FLEET_STATE_HOME:-$HOME/.pi/fleet}"
@@ -60,7 +60,7 @@ done
 
 mkdir -p "$QUEUE"
 
-# L3.5 group info (best-effort, non blocca drain)
+# L3.5 group info (best-effort, does not block drain)
 GROUP_DIR="$STATE/.wake-groups"
 if [[ -d "$GROUP_DIR" ]]; then
   for gf in "$GROUP_DIR"/*.json; do
@@ -69,14 +69,14 @@ if [[ -d "$GROUP_DIR" ]]; then
     [[ -n "$gid" ]] || gid=$(basename "$gf" .json)
     pending=$(jq -r '.pending | length // 0' "$gf" 2>/dev/null || echo "?")
     expected=$(jq -r '.expected // "?"' "$gf" 2>/dev/null || echo "?")
-    # stampa su stderr per non rompere --json/--count, ma visibile in drain default
+    # print to stderr not to break --json/--count, but visible in default drain
     if [[ "$OUTPUT_JSON" != 1 && "$OUTPUT_COUNT" != 1 ]]; then
       echo "GROUP $gid pending $pending/$expected" >&2
     fi
   done
 fi
 
-# Recovery generation check (compatibilità, non blocca)
+# Recovery generation check (compatibility, does not block)
 if [[ -n "$RECOVERY_GEN" ]]; then
   current_gen=$(cat "$GENERATION_FILE" 2>/dev/null | tr -d '[:space:]' || true)
   if [[ -n "$current_gen" && "$current_gen" != "$RECOVERY_GEN" ]]; then
@@ -146,10 +146,10 @@ fi
 # Empty queue
 if [[ "$count" -eq 0 ]]; then
   echo "no pending wakes"
-  # Optional cleanup: if queue vuota e watcher-down esiste, non cancelliamo automaticamente
-  # (recovery generation contract vuole ack esplicito), ma lasciamo marker intatto.
-  # Ack-through su coda vuota è comunque valido: se watcher-down esiste, l'ack può ritirarlo
-  # ma questo script non lo fa senza --ack-through + generazione.
+  # Optional cleanup: if the queue is empty and watcher-down exists, we do not delete automatically
+  # (the recovery generation contract wants an explicit ack), but leave the marker intact.
+  # Ack-through on an empty queue is still valid: if watcher-down exists, the ack can retire it,
+  # but this script does not do it without --ack-through + generation.
   exit 0
 fi
 
@@ -238,8 +238,8 @@ if [[ -n "$ACK_THROUGH" ]]; then
   fi
 fi
 
-# After drain, if queue vuota e .watcher-down esiste, optional cleanup (non distruttivo)
-# Solo se ack ha svuotato la coda e recovery generation è stata verificata
+# After drain, if the queue is empty and .watcher-down exists, optional cleanup (non-destructive)
+# Only if the ack drained the queue and the recovery generation has been verified
 if [[ -n "$ACK_THROUGH" ]]; then
   remaining=$(find "$QUEUE" -maxdepth 1 -name "*.json" -type f 2>/dev/null | wc -l | tr -d '[:space:]')
   case "$remaining" in ''|*[!0-9]*) remaining=0 ;; esac

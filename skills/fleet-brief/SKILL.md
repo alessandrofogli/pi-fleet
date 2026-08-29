@@ -1,55 +1,55 @@
 ---
 name: fleet-brief
-description: 'Template di brief per fleet_launch che delega la self-recon al sub-agent. Il capitano scrive SOLO obiettivo + vincoli + consegna e lancia subito, senza preparare contesto (git recon, lettura docs, inventario claim): il figlio fa da solo self-alignment, self-context, self-verification e self-delivery. Da usare per OGNI fleet_launch.'
+description: 'fleet_launch brief template that delegates self-recon to the sub-agent. The captain writes ONLY objective + constraints + delivery and launches immediately, without preparing context (git recon, doc reading, claim inventory): the child does self-alignment, self-context, self-verification and self-delivery on its own. Use for EVERY fleet_launch.'
 license: MIT
 metadata:
   tags: "fleet, brief, delegation, template, pi-fleet"
   category: "workflow"
 ---
 
-# fleet-brief — lancio immediato con self-recon delegata
+# fleet-brief — immediate launch with delegated self-recon
 
-## Perché esiste
+## Why it exists
 
-Prima di lanciare un task il capitano tende a fare lavoro che il figlio può fare da solo: git recon del repo, lettura di documentazione/reference, inventario dei claim da verificare, controlli pre-push. Questo ritarda il lancio e, peggio, il contesto preparato dal capitano può essere **obsoleto o sbagliato** (es. reference di task passati ≠ stato attuale). La regola: **il capitano non prepara mai il contesto al posto del figlio**.
+Before launching a task the captain tends to do work the child can do on its own: git recon of the repo, reading documentation/reference, inventory of claims to verify, pre-push checks. This delays the launch and, worse, the context prepared by the captain can be **stale or wrong** (e.g. reference to past tasks ≠ current state). The rule: **the captain never prepares context on the child's behalf**.
 
-## Come si scrive un brief (4 fasi, tutte delegate)
+## How to write a brief (4 phases, all delegated)
 
-Il brief istruisce IL FIGLIO a eseguire le 4 fasi; il capitano scrive solo:
+The brief instructs THE CHILD to run the 4 phases; the captain only writes:
 
-1. **Obiettivo** — cosa deve essere vero alla fine (1-3 righe).
-2. **Vincoli** — cosa NON toccare, base/HEAD, scope, rete/credenziali.
-3. **Consegna** — dove va il risultato (report in chat, commit+push, marker), con autorizzazione esplicita se serve push/merge.
-4. **Sospetti noti** (opzionale) — 2-3 claim dubbi da verificare, MAI un inventario completo.
+1. **Objective** — what must be true at the end (1-3 lines).
+2. **Constraints** — what NOT to touch, base/HEAD, scope, network/credentials.
+3. **Delivery** — where the result goes (report in chat, commit+push, marker), with explicit authorization if push/merge is needed.
+4. **Known suspects** (optional) — 2-3 doubtful claims to verify, NEVER a full inventory.
 
-### Fase 1 — Self-alignment (dentro il brief)
+### Phase 1 — Self-alignment (inside the brief)
 ```bash
 git fetch origin
 git checkout -b fleet/<taskid>-<slug> origin/main
 git rev-parse HEAD   # == origin/main
-git status -sb       # segnala se qualcosa è sporco fuori worktree
+git status -sb       # flags if something is dirty outside the worktree
 ```
-Il figlio segnala: rami pendenti non merged, base diversa da origin/main, file sporchi nel checkout principale. NON risolve da solo: riporta.
+The child reports: unmerged pending branches, base different from origin/main, dirty files in the main checkout. Does NOT resolve on its own: reports.
 
-### Fase 2 — Self-context (dentro il brief)
-"Il contesto lo costruisci tu: leggi tu README/docs/report passati e confrontali col codice. Se una descrizione che ti ho dato non torna con il codice, segnalalo e parti dalla verità (evidenza `file:riga`)." Mai copiare nel brief riassunti presi da context obsoleti.
+### Phase 2 — Self-context (inside the brief)
+"Build the context yourself: read README/docs/past reports yourself and compare them with the code. If a description I gave you does not match the code, flag it and start from the truth (evidence `file:line`)." Never copy summaries taken from stale context into the brief.
 
-### Fase 3 — Self-verification (dentro il brief)
-Per ogni claim del risultato: comando grep/esecuzione che lo prova (es. `grep -n triggerTurn extensions/index.ts`, `grep -c registerTool extensions/index.ts`, `npx tsc --noEmit`). Il report cita `file:riga` o "NON TROVATO".
+### Phase 3 — Self-verification (inside the brief)
+For every claim of the result: grep/execution command that proves it (e.g. `grep -n triggerTurn extensions/index.ts`, `grep -c registerTool extensions/index.ts`, `npx tsc --noEmit`). The report cites `file:line` or "NOT FOUND".
 
-### Fase 4 — Self-delivery (dentro il brief, se con merge/push)
-Prima di pushare: status pulito, elenco di ciò che si sta per pushare, niente file estranei (es. `.treehouse/`, `node_modules/`), niente `--force`. In caso di push rifiutato o conflitti: STOP, non forzare, riporta.
+### Phase 4 — Self-delivery (inside the brief, if with merge/push)
+Before pushing: clean status, list of what is about to be pushed, no foreign files (e.g. `.treehouse/`, `node_modules/`), no `--force`. In case of rejected push or conflicts: STOP, do not force, report.
 
-## Esempio reale (avvenuto oggi, cleanup README pi-fleet)
+## Real example (happened today, pi-fleet README cleanup)
 
-Prima del pattern: 2 bash di git recon + analisi reference prima di scrivere il brief (4-5 tool call pre-lancio).
-Con il pattern: il brief conteneva le 4 fasi + obiettivo/vincoli/consegna; il figlio ha fatto da solo allineamento base, lettura README vs codice, verifica claim (12 tool, triggerTurn, double-fork) e consegna con merge+push. Il capitano: 1 fleet_launch, zero pre-work.
+Before the pattern: 2 bash git recon + reference analysis before writing the brief (4-5 pre-launch tool calls).
+With the pattern: the brief contained the 4 phases + objective/constraints/delivery; the child did base alignment on its own, README-vs-code reading, claim verification (12 tools, triggerTurn, double-fork) and delivery with merge+push. The captain: 1 fleet_launch, zero pre-work.
 
-## Checklist brief minimo
+## Minimal brief checklist
 
-- [ ] Obiettivo in 1-3 righe (cosa deve essere VERO alla fine)
-- [ ] Base/HEAD esplicito: "align a origin/main, verifica HEAD"
-- [ ] Vincoli: cosa NON toccare, scope limitato
-- [ ] Consegna + autorizzazione push/merge esplicita SE serve (mai implicita)
-- [ ] "Self-context: leggiti tu i file, se la mia descrizione non torna parti dalla verità"
-- [ ] 1-2 sospetti noti max, mai inventari completi
+- [ ] Objective in 1-3 lines (what must be TRUE at the end)
+- [ ] Explicit base/HEAD: "align to origin/main, verify HEAD"
+- [ ] Constraints: what NOT to touch, limited scope
+- [ ] Delivery + explicit push/merge authorization IF needed (never implicit)
+- [ ] "Self-context: read the files yourself, if my description doesn't match start from the truth"
+- [ ] Max 1-2 known suspects, never full inventories

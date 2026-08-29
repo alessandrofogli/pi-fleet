@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
-# pi-fleet · gate meccanico deterministico (T-011)
+# pi-fleet · deterministic mechanical gate (T-011)
 #
-# Esegue i checks di consegna del progetto gated (gate.yaml, o fallback se assente)
-# IN ORDINE sullo stato corrente della worktree, generando un report.json per-step
-# + overall green|red. Nessun AI nel gate: solo exit code di processi reali.
+# Runs the delivery checks of the gated project (gate.yaml, or fallback if absent)
+# IN ORDER on the current state of the worktree, generating a per-step report.json
+# + overall green|red. No AI in the gate: only exit codes of real processes.
 #
-# Uso:
+# Usage:
 #   bin/gate-run.sh [--report <path>] [--json]
 #
-#   --report <path>   scrive il report json nel path (default: gate/report.json
-#                     relativo alla root del progetto gated = cwd)
-#   --json            stampa il report su stdout (per il figlio)
+#   --report <path>   writes the json report to the path (default: gate/report.json
+#                     relative to the root of the gated project = cwd)
+#   --json            prints the report to stdout (for the child)
 #
-# Config (gate.yaml nella root del cwd):
+# Config (gate.yaml at the root of the cwd):
 #   posture: no-mistakes | autoPr: true|false | loop.maxRounds: N
 #   checks:  - { name, cmd, kind: hard|advisory }
-#   kind hard → ok obbligatorio (exit 0); advisory → report, non blocca.
-#   Config assente → fallback: posture da postures.json (default no-mistakes),
-#   autoPr false, checks default: typecheck (se tsconfig), test (se script test),
-#   + git diff --check + git status pulito (hard). MAI blocca su config assente.
+#   kind hard → required ok (exit 0); advisory → report, does not block.
+#   Missing config → fallback: posture from postures.json (default no-mistakes),
+#   autoPr false, default checks: typecheck (if tsconfig), test (if test script),
+#   + git diff --check + clean git status (hard). NEVER blocks on missing config.
 #
 # Exit code:
-#   0  green — tutti i checks hard ok
-#   1  red   — almeno un check hard ha exit != 0
-#   2  config/strumento mancante — un check hard ha un tool assente (fail-safe,
-#      MAI falso verde); advisory mancante → solo warning, non blocca.
+#   0  green — all hard checks ok
+#   1  red   — at least one hard check has exit != 0
+#   2  missing config/tool — a hard check has a missing tool (fail-safe,
+#      NEVER false green); missing advisory → only warning, does not block.
 #
-# Gira SUL COMMIT CORRENTE della worktree (cwd). Non committa, non pusha, non
-# apre PR: è puramente valutativo.
+# Runs ON THE CURRENT COMMIT of the worktree (cwd). Does not commit, push, or
+# open PRs: it is purely evaluative.
 set -u
 
 REPORT=""
@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --report) REPORT="$2"; shift 2 ;;
     --json) JSON_OUT=1; shift ;;
-    *) printf 'error: argomento sconosciuto: %s\n' "$1" >&2; exit 2 ;;
+    *) printf 'error: unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
 
@@ -45,7 +45,7 @@ GATE_YAML="$PROJECT_ROOT/gate.yaml"
 [[ -z "$REPORT" ]] && REPORT="gate/report.json"
 
 # ------------------------------------------------------------ parse config ----
-# Valori di default (comportamento attuale preservato in assenza di gate.yaml)
+# Default values (current behavior preserved in the absence of gate.yaml)
 posture="no-mistakes"
 autoPr="false"
 maxRounds=5
@@ -72,7 +72,7 @@ if [[ -f "$GATE_YAML" ]]; then
   done < "$GATE_YAML"
 fi
 
-# Fallback: config assente → checks default (hard), MAI bloccante
+# Fallback: missing config → default checks (hard), NEVER blocking
 if [[ ${#CHECKS[@]} -eq 0 ]]; then
   if [[ -f "$PROJECT_ROOT/tsconfig.json" ]]; then
     CHECKS+=( "typecheck|npx tsc --noEmit|hard" )
@@ -85,8 +85,8 @@ if [[ ${#CHECKS[@]} -eq 0 ]]; then
 fi
 
 # ------------------------------------------------------------- run checks ----
-# tool disponibile? Solo per cmd che inizia con un nome semplice (niente operatori
-# shell: in quei casi non falsifica il rilevamento).
+# tool available? Only for cmds starting with a simple name (no shell operators:
+# in those cases don't falsify detection).
 tool_available() {
   local first="$1"
   if [[ "$first" == */* ]]; then [[ -x "$first" ]]; return $?; fi
@@ -95,8 +95,8 @@ tool_available() {
 first_word() { printf '%s' "$1" | awk '{print $1}'; }
 is_simple_cmd() { [[ "$1" =~ ^[A-Za-z0-9_./-]+([[:space:]]|$) ]]; }
 
-has_hard_fail=0     # qualche hard check rosso (exit != 0) → exit 1
-has_hard_missing=0  # qualche hard check con tool mancante → exit 2
+has_hard_fail=0     # any red hard check (exit != 0) → exit 1
+has_hard_missing=0  # any hard check with a missing tool → exit 2
 n=0
 declare -a NAMES=() CMDS=() KINDS=() EXITS=() OKS=() MSGS=()
 
@@ -109,18 +109,18 @@ for entry in "${CHECKS[@]}"; do
   fw="$(first_word "$cmd")"
   if is_simple_cmd "$fw" && ! tool_available "$fw"; then
     code=2
-    msg="tool mancante: $fw"
+    msg="missing tool: $fw"
     if [[ "$kind" == "hard" ]]; then
       has_hard_missing=1
-      printf '[gate] check %s: %s (fail-safe, MAI falso verde)\n' "$name" "$msg" >&2
+      printf '[gate] check %s: %s (fail-safe, NEVER false green)\n' "$name" "$msg" >&2
     else
-      printf '[gate] advisory %s: %s (warning, non blocca)\n' "$name" "$msg" >&2
+      printf '[gate] advisory %s: %s (warning, does not block)\n' "$name" "$msg" >&2
     fi
   else
     out="$(bash -c "$cmd" 2>&1)"
     code=$?
     if [[ -n "$out" ]]; then
-      # strizza: newline → spazio, ANSI codes via, tronca
+      # squeeze: newline → space, strip ANSI codes, truncate
       msg="$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g' | tr '\n' ' ' | cut -c1-160)"
     fi
   fi
@@ -129,18 +129,18 @@ for entry in "${CHECKS[@]}"; do
     if [[ "$code" -ne 0 && "$code" -ne 2 ]]; then has_hard_fail=1; fi
   fi
   NAMES+=("$name"); CMDS+=("$cmd"); KINDS+=("$kind"); EXITS+=("$code"); OKS+=("$ok"); MSGS+=("$msg")
-  # log dei check su STDERR: stdout resta pulito per --json
+  # per-check log on STDERR: stdout stays clean for --json
   printf '[gate] %-12s %-8s exit=%s ok=%s\n' "$name" "$kind" "$code" "$ok" >&2
   [[ -n "$msg" ]] && printf '        → %s\n' "$msg" >&2
 done
 
 # --------------------------------------------------------------- report ----
-# overall: tool mancante hard forza red (ma exit 2); altrimenti green se tutto ok
+# overall: missing hard tool forces red (but exit 2); otherwise green if everything ok
 overall="green"
 if [[ "$has_hard_missing" -eq 1 ]]; then overall="red"; fi
 if [[ "$has_hard_fail" -eq 1 ]]; then overall="red"; fi
 
-# costruisci l'array checks come json
+# build the checks array as json
 build_checks() {
   printf '['
   for ((i = 0; i < n; i++)); do

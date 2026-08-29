@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# pi-fleet · fleet-watch.sh — watcher esterno zero-token (L3), loop polling+classificazione
-# Esegue fuori da Pi (zero-token, restart-proof), classifica task JSON in ~/.pi/fleet
-# e accoda wake actionable su .wake-queue. Singleton via fleet-lock-lib.sh.
+# pi-fleet · fleet-watch.sh — zero-token external watcher (L3), polling+classification loop
+# Runs outside Pi (zero-token, restart-proof), classifies task JSON in ~/.pi/fleet
+# and queues actionable wakes into .wake-queue. Singleton via fleet-lock-lib.sh.
 # L3.5 group barrier: tasks with groupId barrier are buffered by the TS coordinator,
 # not woken per-task. This bash watcher still exits with signal: <id>.done for each
 # terminal task; the TS extension (fleet-group.ts) filters before sendMessage
@@ -16,7 +16,7 @@ mkdir -p "$STATE/tasks" 2>/dev/null || true
 
 # shellcheck source=bin/fleet-lock-lib.sh
 . "$SCRIPT_DIR/fleet-lock-lib.sh"
-# fleet-wake-lib.sh opzionale (per queue helpers condivisi)
+# fleet-wake-lib.sh optional (for shared queue helpers)
 if [ -f "$SCRIPT_DIR/fleet-wake-lib.sh" ]; then
   # shellcheck source=bin/fleet-wake-lib.sh
   . "$SCRIPT_DIR/fleet-wake-lib.sh" 2>/dev/null || true
@@ -26,7 +26,7 @@ POLL="${FLEET_POLL:-3}"
 HEARTBEAT="${FLEET_HEARTBEAT:-60}"
 SIGNAL_GRACE=5
 
-# Validazione numerica (evita arithmetic error sotto set -u)
+# Numeric validation (avoids arithmetic error under set -u)
 case "$POLL" in ''|*[!0-9]*) POLL=3 ;; esac
 case "$HEARTBEAT" in ''|*[!0-9]*) HEARTBEAT=60 ;; esac
 
@@ -57,7 +57,7 @@ if ! fleet_lock_try_acquire 2>/dev/null; then
     printf 'watcher: healthy pid=%s beat_age=%ss\n' "$_owner" "$_age" 2>&1
     exit 0
   else
-    # stale già gestito da try_acquire; ritenta una volta
+    # stale already handled by try_acquire; retry once
     rm -f "$WATCH_LOCK" 2>/dev/null || true
     if ! fleet_lock_try_acquire 2>/dev/null; then
       printf 'watcher: healthy\n' 2>&1
@@ -66,7 +66,7 @@ if ! fleet_lock_try_acquire 2>/dev/null; then
   fi
 fi
 
-# Trap per rilascio lock solo se owned
+# Trap to release the lock only if owned
 _fleet_watch_cleanup() {
   fleet_lock_release 2>/dev/null || true
 }
@@ -76,12 +76,12 @@ trap '_fleet_watch_cleanup; exit 1' HUP
 
 # --- helpers ---
 
-# Log absorb bounded (max 500 righe) su STATE/.watch-triage.log
+# Bounded absorb log (max 500 lines) on STATE/.watch-triage.log
 _fleet_triage_log() {
   local msg="$1" log="$STATE/.watch-triage.log" tmp
   mkdir -p "$STATE" 2>/dev/null || true
   printf '[%s] %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z 2>/dev/null || date)" "$msg" >> "$log" 2>/dev/null || true
-  # ruota a 500 righe
+  # rotate at 500 lines
   if [ -f "$log" ]; then
     local n
     n=$(wc -l < "$log" 2>/dev/null | tr -d ' ') || n=0
@@ -91,11 +91,11 @@ _fleet_triage_log() {
       tail -n 500 "$log" > "$tmp" 2>/dev/null && mv "$tmp" "$log" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
     fi
   fi
-  # debug su stderr (non interferisce con reason su stdout)
+  # debug on stderr (does not interfere with the reason on stdout)
   printf '[fleet-watch] %s\n' "$msg" >&2 || true
 }
 
-# Seq monotonic con lock (flock se disponibile, altrimenti mkdir lock)
+# Monotonic seq with lock (flock if available, otherwise mkdir lock)
 _fleet_next_seq() {
   local seq_file="$STATE/.wake-seq"
   local seq=0
@@ -131,7 +131,7 @@ _fleet_next_seq() {
   fi
 }
 
-# Accoda wake actionable: scrive .wake-queue/<seq>.json e append a .watch-deliveries.log
+# Queues an actionable wake: writes .wake-queue/<seq>.json and appends to .watch-deliveries.log
 _fleet_enqueue_wake() {
   local taskId="$1" reason="$2"
   local seq now out tmp
@@ -142,11 +142,11 @@ _fleet_enqueue_wake() {
   now=$(date +%s 2>/dev/null || echo 0)
   case "$now" in ''|*[!0-9]*) now=0 ;; esac
   out="$STATE/.wake-queue/${seq}.json"
-  # evita collisione (seq duplicato per race)
+  # avoid collision (seq duplicated by race)
   if [ -f "$out" ]; then
     out="$STATE/.wake-queue/${seq}-$$-$(date +%s 2>/dev/null || echo 0).json"
   fi
-  # jq -Rs per escaping sicuro
+  # jq -Rs for safe escaping
   local j_task j_reason
   j_task=$(printf '%s' "$taskId" | jq -Rs . 2>/dev/null || printf '"%s"' "$taskId")
   j_reason=$(printf '%s' "$reason" | jq -Rs . 2>/dev/null || printf '"%s"' "$reason")
@@ -156,7 +156,7 @@ _fleet_enqueue_wake() {
   printf '%s\t%s\n' "$$" "$reason" >> "$STATE/.watch-deliveries.log" 2>/dev/null || true
 }
 
-# Verifica se un wake per taskId è già in coda (evita duplicati per failed)
+# Checks whether a wake for taskId is already queued (avoids duplicates for failed)
 _fleet_already_queued() {
   local tid="$1" q qtid
   for q in "$STATE/.wake-queue"/*.json; do
@@ -175,7 +175,7 @@ case "$_last_heartbeat" in ''|*[!0-9]*) _last_heartbeat=0 ;; esac
 while :; do
   fleet_beat_touch 2>/dev/null || true
 
-  # self-eviction: se il lock non è più nostro, un altro watcher ha preso over
+  # self-eviction: if the lock is no longer ours, another watcher took over
   if ! fleet_lock_is_owned 2>/dev/null; then
     _fleet_triage_log "lock lost (owner=$(fleet_lock_owner_pid 2>/dev/null || echo none)), exiting"
     exit 0
@@ -187,7 +187,7 @@ while :; do
   case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
   _now_ms=$((_now * 1000))
 
-  # Scansiona task JSON (esclude marker already-filtered)
+  # Scans task JSON (excludes already-filtered markers)
   for _f in "$STATE"/*.json; do
     [ -e "$_f" ] || continue
     _bn=$(basename "$_f" 2>/dev/null || echo "")
@@ -204,10 +204,10 @@ while :; do
     if [ -z "$_tid" ]; then
       _tid=${_bn%.json}
     fi
-    # validazione id (evita path traversal)
+    # id validation (avoids path traversal)
     case "$_tid" in ''|*/*|*\\*) continue ;; esac
 
-    # 1) done marker → actionable (priorità alta, indipendente da .state)
+    # 1) done marker → actionable (high priority, independent of .state)
     if [ -f "$STATE/${_tid}.done.json" ]; then
       _actionable="signal: ${_tid}.done"
       _taskId_found="$_tid"
@@ -236,7 +236,7 @@ while :; do
         fi
       fi
 
-      # pane liveness (solo se running da >30s)
+      # pane liveness (only if running for >30s)
       _paneId=$(jq -r '.paneId // empty' "$_f" 2>/dev/null) || _paneId=""
       if [ -n "$_paneId" ] && [ "$_startedAt" -gt 0 ]; then
         _age_ms=$((_now_ms - _startedAt))
@@ -253,10 +253,10 @@ while :; do
           fi
         fi
       fi
-      # altrimenti benign → assorbe, continua
+      # otherwise benign → absorb, continue
     fi
 
-    # 3) failed non ancora consegnato → actionable
+    # 3) failed not yet delivered → actionable
     if [ "$_state" = "failed" ]; then
       if ! _fleet_already_queued "$_tid"; then
         _actionable="signal: ${_tid} failed"
@@ -268,22 +268,22 @@ while :; do
 
   if [ -n "$_actionable" ]; then
     _fleet_enqueue_wake "$_taskId_found" "$_actionable"
-    # reason su stdout per arm (verifica delivery), log anche su triage
+    # reason on stdout for arm (delivery verification), also logged to triage
     _fleet_triage_log "actionable: $_actionable (task=$_taskId_found)"
     printf '%s\n' "$_actionable"
     exit 0
   fi
 
-  # heartbeat scan: ogni HEARTBEAT sec riscansiona comunque per stale non rilevati
-  # (il loop già scansiona ogni POLL, ma qui manteniamo last_heartbeat per log)
+  # heartbeat scan: every HEARTBEAT sec it re-scans anyway for undetected stale
+  # (the loop already scans every POLL, but here we keep last_heartbeat for logging)
   _now2=$(date +%s 2>/dev/null || echo 0)
   case "$_now2" in ''|*[!0-9]*) _now2=0 ;; esac
   if [ $((_now2 - _last_heartbeat)) -ge "$HEARTBEAT" ]; then
     _last_heartbeat=$_now2
-    # T-002 (5b.2): inbox re-ring ESTERNO — decisione: BEST-EFFORT, solo menzione
-    # nella classificazione del triage (log). Il re-ring/escalation vero è
-    # in-process (extensions/fleet-inbox.ts nel capitano): questo loop bash non
-    # deve mai bloccarsi su consegne/ack, quindi qui niente enqueue_wake.
+    # T-002 (5b.2): EXTERNAL inbox re-ring — decision: BEST-EFFORT, only mention
+    # it in the triage classification (log). The real re-ring/escalation is
+    # in-process (extensions/fleet-inbox.ts in the captain): this bash loop must
+    # never block on deliveries/acks, so no enqueue_wake here.
     _inbox_summary=""
     for _idir in "$STATE"/*.inbox; do
       [ -d "$_idir" ] || continue
@@ -305,7 +305,7 @@ while :; do
     if [ -n "$_inbox_summary" ]; then
       _fleet_triage_log "inbox pending (best-effort; re-ring in-process): $_inbox_summary"
     fi
-    # Touch aggiorna anche .last-heartbeat implicito via beat; log separato
+    # Touch also updates the implicit .last-heartbeat via beat; separate log
     _fleet_triage_log "heartbeat scan (no actionable)"
   else
     _fleet_triage_log "absorb: no actionable at ${_now}"
