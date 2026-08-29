@@ -11,19 +11,19 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-// ------------------------------------------------------------------ tipi ---
+// ------------------------------------------------------------------ types ---
 
-/** Stato possibile di un task (allineato a TaskStateFile in index.ts). */
+/** Possible state of a task (aligned with TaskStateFile in index.ts). */
 export type GroupTaskState = "spawning" | "running" | "done" | "failed" | "aborted" | "needs_input";
 
-/** StatI terminali del gruppo — usati per barrier flush. */
+/** Terminal states of the group — used for barrier flush. */
 export const GROUP_TERMINAL_STATES: ReadonlySet<GroupTaskState> = new Set<GroupTaskState>([
   "done",
   "failed",
   "aborted",
 ]);
 
-/** Info minima di un task necessaria al coordinatore barrier. */
+/** Minimal task info needed by the barrier coordinator. */
 export interface GroupTaskInfo {
   id: string;
   title?: string;
@@ -35,13 +35,13 @@ export interface GroupTaskInfo {
   groupLabel?: string;
   groupMode: "barrier" | "streaming";
   kind?: "ship" | "scout";
-  /** Policy di fallimento del gruppo: waitAll (default) | immediate (failed sveglia subito). */
+  /** Group failure policy: waitAll (default) | immediate (a failed task wakes right away). */
   groupFailPolicy?: "waitAll" | "immediate";
 }
 
 /**
- * TaskStateFile come scritto su disco da launcher/estensione.
- * Campi gruppo opzionali per retrocompatibilità (task vecchi senza gruppo).
+ * TaskStateFile as written to disk by launcher/extension.
+ * Optional group fields for backward compatibility (old tasks without a group).
  */
 export interface TaskStateFile {
   id: string;
@@ -69,7 +69,7 @@ export interface TaskStateFile {
   groupFailPolicy?: "waitAll" | "immediate";
 }
 
-/** Record in memoria per un gruppo barrier. */
+/** In-memory record for a barrier group. */
 export interface GroupRecord {
   groupId: string;
   expected: number;
@@ -77,7 +77,7 @@ export interface GroupRecord {
   results: Map<string, GroupTaskInfo>;
   createdAt: number;
   label?: string;
-  /** Policy di fallimento: waitAll (default) | immediate (failed sveglia subito). */
+  /** Failure policy: waitAll (default) | immediate (a failed task wakes right away). */
   failPolicy?: "waitAll" | "immediate";
 }
 
@@ -90,25 +90,25 @@ export type GroupEvent =
 // ----------------------------------------------------------- helpers base ---
 
 /**
- * Ritorna true se lo stato è terminale (done/failed/aborted).
- * needs_input è trattato come caso speciale — NON è terminale qui.
+ * Returns true if the state is terminal (done/failed/aborted).
+ * needs_input is treated as a special case — NOT terminal here.
  */
 export function isTerminalState(state: string): boolean {
   return GROUP_TERMINAL_STATES.has(state as GroupTaskState);
 }
 
 /**
- * Ritorna true se il gruppo è completo (nessun pending rimasto).
+ * Returns true if the group is complete (no pending left).
  */
 export function isGroupComplete(group: GroupRecord): boolean {
   return group.pending.size === 0;
 }
 
 /**
- * Decide se il task va bufferizzato invece di svegliare subito.
- * Solo barrier + done/failed viene bufferizzato; streaming mai.
- * Eccezione: con groupFailPolicy "immediate" il FAILED non viene bufferizzato
- * (sveglia subito); done/aborted restano waitAll anche con policy immediate.
+ * Decides whether the task should be buffered instead of waking right away.
+ * Only barrier + done/failed is buffered; streaming never.
+ * Exception: with groupFailPolicy "immediate" the FAILED is not buffered
+ * (wakes right away); done/aborted stay waitAll even with the immediate policy.
  */
 export function shouldBuffer(task: GroupTaskInfo): boolean {
   if (task.groupMode !== "barrier") return false;
@@ -116,9 +116,9 @@ export function shouldBuffer(task: GroupTaskInfo): boolean {
   return task.state === "done" || task.state === "failed";
 }
 
-// ------------------------------------------------------- conversione task ---
+// ------------------------------------------------------- task conversion ---
 
-/** Converte un TaskStateFile letto da disco in GroupTaskInfo per il coordinatore. */
+/** Converts a TaskStateFile read from disk into GroupTaskInfo for the coordinator. */
 export function toGroupTaskInfo(task: TaskStateFile): GroupTaskInfo {
   return {
     id: task.id,
@@ -135,7 +135,7 @@ export function toGroupTaskInfo(task: TaskStateFile): GroupTaskInfo {
   };
 }
 
-// ------------------------------------------------------- persistenza su disco ---
+// ------------------------------------------------------- disk persistence ---
 
 interface PersistedGroup {
   groupId: string;
@@ -152,8 +152,8 @@ function groupsDir(stateHome: string): string {
 }
 
 /**
- * Persiste un GroupRecord su disco in modo atomico (tmp + rename).
- * Crea la directory se mancante.
+ * Persists a GroupRecord to disk atomically (tmp + rename).
+ * Creates the directory if missing.
  */
 export function persistGroup(stateHome: string, record: GroupRecord): void {
   const dir = groupsDir(stateHome);
@@ -174,8 +174,8 @@ export function persistGroup(stateHome: string, record: GroupRecord): void {
 }
 
 /**
- * Carica tutti i gruppi persistiti da STATE_HOME/.wake-groups/*.json.
- * File corrotti vengono ignorati (non bloccano il load).
+ * Loads all persisted groups from STATE_HOME/.wake-groups/*.json.
+ * Corrupted files are ignored (they don't block the load).
  */
 export function loadGroups(stateHome: string): Map<string, GroupRecord> {
   const dir = groupsDir(stateHome);
@@ -204,7 +204,7 @@ export function loadGroups(stateHome: string): Map<string, GroupRecord> {
         ),
         createdAt: typeof data.createdAt === "number" ? data.createdAt : Date.now(),
         label: typeof data.label === "string" ? data.label : undefined,
-        // retrocompatibile: file senza failPolicy → waitAll (default)
+        // backward compatible: file without failPolicy → waitAll (default)
         failPolicy:
           data.failPolicy === "immediate"
             ? "immediate"
@@ -214,23 +214,23 @@ export function loadGroups(stateHome: string): Map<string, GroupRecord> {
       };
       out.set(record.groupId, record);
     } catch {
-      // file corrotto o a metà scrittura — ignora
+      // corrupted or mid-write file — ignore
     }
   }
   return out;
 }
 
 /**
- * Rimuove il file persistito di un gruppo (chiamato dopo digest consegnato).
+ * Removes a group's persisted file (called after the digest is delivered).
  */
 export function removeGroup(stateHome: string, groupId: string): void {
   const p = join(groupsDir(stateHome), `${groupId}.json`);
   try {
     rmSync(p);
   } catch {
-    // già rimosso o mai esistito
+    // already removed or never existed
   }
-  // pulisce eventuali tmp orfani dello stesso gruppo
+  // cleans up possible orphan tmps of the same group
   try {
     const dir = groupsDir(stateHome);
     if (!existsSync(dir)) return;
@@ -245,9 +245,9 @@ export function removeGroup(stateHome: string, groupId: string): void {
 // ------------------------------------------------------- getOrCreateGroup ---
 
 /**
- * Recupera un gruppo esistente o ne crea uno nuovo.
- * Se il task riporta expected===1 ma esiste già un record con expected>1,
- * prevale l'expected del record (batch allargato dopo il primo launch).
+ * Gets an existing group or creates a new one.
+ * If the task reports expected===1 but a record with expected>1 already exists,
+ * the record's expected wins (batch enlarged after the first launch).
  */
 export function getOrCreateGroup(
   groupMap: Map<string, GroupRecord>,
@@ -256,7 +256,7 @@ export function getOrCreateGroup(
   const gid = info.groupId;
   const existing = groupMap.get(gid);
   if (existing) {
-    // se il file task ha expected diverso, tieni il più grande (batch allargato)
+    // if the task file has a different expected, keep the largest (enlarged batch)
     if (info.groupSize > existing.expected) {
       existing.expected = info.groupSize;
     }
@@ -268,12 +268,12 @@ export function getOrCreateGroup(
     }
     return existing;
   }
-  // crea nuovo record: pending contiene tutti gli id attesi inizialmente
-  // se non conosciamo gli id singoli, pending parte con l'id stesso più placeholder
-  // ricostruzione più precisa avviene in rebuildGroupsFromDisk
+  // create a new record: pending holds all the initially expected ids
+  // if we don't know the individual ids, pending starts with this id plus placeholder
+  // a more precise reconstruction happens in rebuildGroupsFromDisk
   const pending = new Set<string>();
-  // se expected >1 ma conosciamo solo questo id, metti almeno questo id in pending
-  // gli altri id verranno aggiunti man mano che i task arrivano o via rebuild
+  // if expected >1 but we only know this id, put at least this id in pending
+  // the other ids will be added as tasks arrive or via rebuild
   pending.add(info.id);
   const record: GroupRecord = {
     groupId: gid,
@@ -291,12 +291,12 @@ export function getOrCreateGroup(
 // ------------------------------------------------------- recordTaskDone ---
 
 /**
- * Logica core della barrier.
+ * Core barrier logic.
  *
- * - Risolve groupId/mode/expected dal task (retrocompatibile).
- * - Se needs_input → evento immediato (rompe la barrier).
- * - Se barrier + done/failed + expected>1 → bufferizza, persiste, e quando pending vuoto → group_complete.
- * - Se singolo (expected===1) → group_complete subito (retrocompatibile).
+ * - Resolves groupId/mode/expected from the task (backward compatible).
+ * - If needs_input → immediate event (breaks the barrier).
+ * - If barrier + done/failed + expected>1 → buffers, persists, and when pending is empty → group_complete.
+ * - If single (expected===1) → group_complete right away (backward compatible).
  */
 export function recordTaskDone(
   stateHome: string,
@@ -305,43 +305,43 @@ export function recordTaskDone(
 ): GroupEvent {
   const info = toGroupTaskInfo(task);
 
-  // expected effettivo: se il task dice 1 ma esiste già un gruppo più grande, usa quello
+  // effective expected: if the task says 1 but a bigger group already exists, use that
   const existing = groupMap.get(info.groupId);
   const effectiveExpected =
     existing && info.groupSize === 1 && existing.expected > 1 ? existing.expected : info.groupSize;
   info.groupSize = effectiveExpected;
 
-  // ottieni o crea il record
+  // get or create the record
   const group = getOrCreateGroup(groupMap, info);
-  // assicurati che expected sia allineato
+  // make sure expected is aligned
   if (effectiveExpected > group.expected) group.expected = effectiveExpected;
   if (info.groupLabel && !group.label) group.label = info.groupLabel;
   if (info.groupFailPolicy === "immediate" && !group.failPolicy) group.failPolicy = info.groupFailPolicy;
 
-  // needs_input rompe sempre la barrier — wake immediato
+  // needs_input always breaks the barrier — immediate wake
   if (task.state === "needs_input") {
-    // non bufferizzare, non marcare come result
-    // assicurati che il gruppo sia persistito per recovery (pending resta)
+    // don't buffer, don't mark as result
+    // make sure the group is persisted for recovery (pending stays)
     try {
       persistGroup(stateHome, group);
     } catch { /* best-effort */ }
     return { kind: "needs_input", task: info, group };
   }
 
-  // singolo → completo subito (nessun buffering)
+  // single → complete right away (no buffering)
   if (group.expected <= 1) {
-    // per coerenza, aggiungi a results e svuota pending
+    // for consistency, add to results and empty pending
     group.results.set(info.id, info);
     group.pending.delete(info.id);
-    // single non necessita persistenza barrier, ma pulisci eventuale file orfano
+    // single does not need barrier persistence, but clean up any orphan file
     try { removeGroup(stateHome, group.groupId); } catch { /* ignore */ }
     return { kind: "group_complete", groupId: group.groupId, results: [info] };
   }
 
-  // gruppo multi-task + groupFailPolicy "immediate" + failed → wake SUBITO.
-  // NON bufferizza, ma registra comunque il result nel gruppo e persiste:
-  // il gruppo resta pending e il digest scatta quando finiscono gli altri.
-  // done/aborted restano waitAll (bufferizzati) anche con policy immediate.
+  // multi-task group + groupFailPolicy "immediate" + failed → wake NOW.
+  // Does NOT buffer, but still records the result in the group and persists:
+  // the group stays pending and the digest fires when the others finish.
+  // done/aborted stay waitAll (buffered) even with the immediate policy.
   if (task.state === "failed" && info.groupFailPolicy === "immediate") {
     group.results.set(info.id, info);
     group.pending.delete(info.id);
@@ -349,42 +349,42 @@ export function recordTaskDone(
     return { kind: "group_failed_immediate", task: info, group };
   }
 
-  // gruppo multi-task: decide se bufferizzare
+  // multi-task group: decide whether to buffer
   if (shouldBuffer(info)) {
     group.results.set(info.id, info);
     group.pending.delete(info.id);
-    // se pending era inizialmente solo con questo id (gruppo creato lazy),
-    // pending ora è vuoto ma expected dice 3 → non è davvero completo.
-    // Correggi: se results.size < expected, il gruppo NON è completo anche se pending vuoto.
-    // In quel caso pending va ricostruito come "mancanti" e NON emettiamo group_complete.
-    // Tuttavia la strategia corretta è: pending contiene gli id mancanti noti.
-    // Se abbiamo creato il gruppo con un solo id ma expected=3, pending.size==0 dopo
-    // la prima rimozione significa che non conosciamo ancora gli altri id.
-    // Usiamo la size di results per capire se siamo davvero a quota expected.
+    // if pending initially held only this id (group created lazily),
+    // pending is now empty but expected says 3 → not really complete.
+    // Fix: if results.size < expected, the group is NOT complete even if pending is empty.
+    // In that case pending should be rebuilt as "missing" and we must NOT emit group_complete.
+    // However the correct strategy is: pending holds the known missing ids.
+    // If we created the group with a single id but expected=3, pending.size==0 after
+    // the first removal means we still don't know the other ids.
+    // We use the results size to understand whether we are really at the expected count.
     const reallyComplete = group.results.size >= group.expected && group.pending.size === 0;
 
-    // Se non siamo completi ma pending è vuoto, non persistiamo come "completo":
-    // teniamo pending vuoto ma results.size < expected → buffered.
-    // Il completamento scatterà quando results.size == expected.
-    // Per evitare falso group_complete alla prima scrittura lazy, controlla results.size.
+    // If we are not complete but pending is empty, we don't persist as "complete":
+    // we keep pending empty but results.size < expected → buffered.
+    // Completion will fire when results.size == expected.
+    // To avoid a false group_complete on the first lazy write, check results.size.
     try {
       persistGroup(stateHome, group);
     } catch { /* best-effort */ }
 
     if (reallyComplete || (group.results.size === group.expected)) {
-      // tutti arrivati
+      // all arrived
       const sorted = [...group.results.values()].sort((a, b) =>
         (a.title ?? a.id).localeCompare(b.title ?? b.id),
       );
       return { kind: "group_complete", groupId: group.groupId, results: sorted };
     }
-    // se pending vuoto ma non tutti i results arrivati (gruppo lazy), resta buffered
-    // il chiamante non deve svegliare
+    // if pending is empty but not all results arrived (lazy group), stays buffered
+    // the caller must not wake
     return { kind: "buffered", taskId: info.id, groupId: group.groupId };
   }
 
-  // streaming o stato non bufferizzato (aborted, running, etc.) → group_complete immediato
-  // (aborted in barrier: lo trattiamo come wake immediato con contesto gruppo)
+  // streaming or non-buffered state (aborted, running, etc.) → immediate group_complete
+  // (aborted in barrier: we treat it as an immediate wake with group context)
   if (isTerminalState(info.state)) {
     group.results.set(info.id, info);
     group.pending.delete(info.id);
@@ -395,33 +395,33 @@ export function recordTaskDone(
       );
       return { kind: "group_complete", groupId: group.groupId, results: sorted };
     }
-    // se terminale ma gruppo non ancora completo, comunque buffered per non perdere il result
-    // (il digest arriverà quando l'ultimo finisce). Per aborted dentro barrier preferiamo buffered.
+    // if terminal but the group is not complete yet, still buffered to not lose the result
+    // (the digest will arrive when the last one finishes). For aborted inside a barrier we prefer buffered.
     if (group.expected > 1 && info.groupMode === "barrier") {
       return { kind: "buffered", taskId: info.id, groupId: group.groupId };
     }
     return { kind: "group_complete", groupId: group.groupId, results: [info] };
   }
 
-  // non terminale (spawning/running) — non dovrebbe arrivare a recordTaskDone, ma gestito
+  // non-terminal (spawning/running) — should not reach recordTaskDone, but handled
   return { kind: "buffered", taskId: info.id, groupId: group.groupId };
 }
 
 // ------------------------------------------------ rebuildGroupsFromDisk ---
 
 /**
- * Ricostruisce i gruppi scansionando tutti i TaskStateFile su disco.
- * Usato al restart di Pi per recuperare lo stato barrier dopo chiusura.
+ * Rebuilds the groups by scanning all TaskStateFiles on disk.
+ * Used at Pi restart to recover the barrier state after closure.
  *
- * - Raggruppa per groupId (fallback task.id).
- * - Per ogni gruppo calcola pending (spawning|running|needs_input) e results (terminali).
- * - expected = max tra groupSize dichiarato e cardinalità reale del gruppo.
+ * - Groups by groupId (fallback task.id).
+ * - For each group computes pending (spawning|running|needs_input) and results (terminal).
+ * - expected = max between declared groupSize and the group's real cardinality.
  */
 export function rebuildGroupsFromDisk(
   stateHome: string,
   allTasks: TaskStateFile[],
 ): Map<string, GroupRecord> {
-  // prima prova a caricare quelli persistiti (hanno label/createdAt più fedeli)
+  // first try loading the persisted ones (they have more faithful label/createdAt)
   const persisted = loadGroups(stateHome);
   const grouped = new Map<string, TaskStateFile[]>();
 
@@ -436,10 +436,10 @@ export function rebuildGroupsFromDisk(
 
   for (const [gid, tasks] of grouped) {
     const maxDeclared = Math.max(...tasks.map((t) => t.groupSize ?? 1), 1);
-    // expected è il max tra dichiarato e cardinalità reale
+    // expected is the max between declared and real cardinality
     const expected = Math.max(maxDeclared, tasks.length);
     const label = tasks.find((t) => t.groupLabel)?.groupLabel ?? persisted.get(gid)?.label;
-    // policy del gruppo: prevalgono i task con immediate esplicito, poi il persistito
+    // group policy: tasks with explicit immediate win, then the persisted one
     const failPolicy =
       tasks.find((t) => t.groupFailPolicy === "immediate")?.groupFailPolicy ??
       persisted.get(gid)?.failPolicy;
@@ -450,7 +450,7 @@ export function rebuildGroupsFromDisk(
     const pending = new Set<string>();
     const results = new Map<string, GroupTaskInfo>();
 
-    // se esiste un record persistito, parti da quello e riconcilia
+    // if a persisted record exists, start from it and reconcile
     const base = persisted.get(gid);
     if (base) {
       for (const [k, v] of base.results) results.set(k, v);
@@ -459,7 +459,7 @@ export function rebuildGroupsFromDisk(
 
     for (const t of tasks) {
       const info = toGroupTaskInfo(t);
-      // allinea groupSize al gid effettivo
+      // align groupSize to the effective gid
       info.groupId = gid;
       if (isTerminalState(t.state)) {
         results.set(t.id, info);
@@ -469,17 +469,17 @@ export function rebuildGroupsFromDisk(
       } else {
         // spawning | running → pending
         pending.add(t.id);
-        // rimuovi da results se per caso era stato messo
+        // remove from results if it had been put there by chance
         results.delete(t.id);
       }
     }
 
-    // se non c'è base persistita e pending è vuoto ma non tutti terminali, ricostruisci
-    // (caso: task appena creati)
+    // if there is no persisted base and pending is empty but not all are terminal, rebuild
+    // (case: just-created tasks)
     if (!base && pending.size === 0 && results.size < expected) {
-      // mancano task non ancora comparsi su disco — pendings impliciti
-      // non possiamo conoscere gli id, lasciamo pending vuoto ma expected tiene il conto
-      // il completamento scatterà quando results.size == expected
+      // tasks not yet appeared on disk — implicit pendings
+      // we cannot know the ids, we leave pending empty but expected keeps the count
+      // completion will fire when results.size == expected
     }
 
     const record: GroupRecord = {
@@ -494,7 +494,7 @@ export function rebuildGroupsFromDisk(
     out.set(gid, record);
   }
 
-  // includi anche gruppi persistiti che non hanno più task su disco (orfani)
+  // also include persisted groups that no longer have tasks on disk (orphans)
   for (const [gid, rec] of persisted) {
     if (!out.has(gid)) out.set(gid, rec);
   }
@@ -528,8 +528,8 @@ export function buildGroupSummaries(
 // --------------------------------------------------- formatGroupDigest ---
 
 /**
- * Genera il digest di gruppo - CONCISO, senza dump verboso dei subagent.
- * Solo header + lista titoli/stati. Il main farà il resoconto sintetico.
+ * Generates the group digest - CONCISE, without verbose subagent dumps.
+ * Only header + list of titles/states. The main will give the synthetic account.
  */
 export function formatGroupDigest(group: GroupRecord | string, resultsSorted: GroupTaskInfo[], label?: string): string {
   const groupId = typeof group === "string" ? group : group.groupId;
@@ -537,11 +537,11 @@ export function formatGroupDigest(group: GroupRecord | string, resultsSorted: Gr
   const groupLabel = typeof group === "string" ? label ?? resultsSorted.find((r) => r.groupLabel)?.groupLabel : group.label;
   const done = resultsSorted.length;
   const labelPart = groupLabel ? ` "${groupLabel}"` : "";
-  const header = `\u2691 pi-fleet \u2014 gruppo${labelPart} completo (${done}/${total}) \u2014 ${groupId}`;
+  const header = `\u2691 pi-fleet \u2014 group${labelPart} complete (${done}/${total}) \u2014 ${groupId}`;
   const list = resultsSorted
     .slice()
     .sort((a, b) => (a.title ?? a.id).localeCompare(b.title ?? b.id))
     .map((r) => `- ${r.title ?? r.id} [${r.state}]`)
     .join("\n");
-  return `${header}\n${list}\n\nFai un resoconto sintetico per il gruppo (non ripetere verbatim i report dei subagent).`;
+  return `${header}\n${list}\n\nProvide a concise account for the group (do not repeat the subagent reports verbatim).`;
 }

@@ -1,15 +1,15 @@
-/** pi-fleet · watcher esterno L3 — port semplificato di fm-primary-pi-watch.ts
+/** pi-fleet · external watcher L3 — simplified port of fm-primary-pi-watch.ts
  *
- * Gestisce il ciclo di vita del watcher esterno zero-token:
- * generation ownership, lock ownership, arm child, classifica close,
- * riarmo del successore PRIMA del wake (ordering critico), retry backoff,
- * confirm handling-delivered, drain queue, tool fleet_watch_arm_pi.
+ * Manages the zero-token external watcher lifecycle:
+ * generation ownership, lock ownership, arm child, close classification,
+ * successor re-arm BEFORE the wake (critical ordering), retry backoff,
+ * handling-delivered confirmation, queue drain, fleet_watch_arm_pi tool.
  *
- * Semplificazioni vs firstmate (MVP):
- * - niente branch dispatch / secondmate
- * - niente calm presentation
- * - niente encodeFirstmateOperationalInput — usa pi.sendMessage diretto
- * - beat generation semplice Date.now()-pid
+ * Simplifications vs firstmate (MVP):
+ * - no branch dispatch / secondmate
+ * - no calm presentation
+ * - no encodeFirstmateOperationalInput — uses direct pi.sendMessage
+ * - simple Date.now()-pid beat generation
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -21,7 +21,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { GroupRecord, GroupTaskInfo } from "./fleet-group.js";
 
-// ---------------------------------------------------------------- tipi ----
+// ---------------------------------------------------------------- types ----
 type ArmResult = { ok: boolean; message: string };
 type LockOwnership = "owned" | "missing" | "other";
 type CloseClassification = { kind: "actionable" | "failure"; message: string };
@@ -35,7 +35,7 @@ type SessionGeneration = {
   seq: number;
 };
 
-// --------------------------------------------------------------- costanti ----
+// --------------------------------------------------------------- constants ----
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 
@@ -83,7 +83,7 @@ function pidAlive(pid: string): boolean {
 }
 
 function lockOwnership(stateHome: string): LockOwnership {
-  // pi-fleet usa .watch.lock (spec L3); fallback su .lock per compatibilità
+  // pi-fleet uses .watch.lock (L3 spec); fallback to .lock for compatibility
   let lockPid = "";
   for (const name of [".watch.lock", ".lock"]) {
     try {
@@ -173,7 +173,7 @@ const cleanupOnProcessExit = (): void => {
 };
 process.once("exit", cleanupOnProcessExit);
 
-// ------------------------------------------------------- mount principale ----
+// ------------------------------------------------------- main mount ----
 export interface FleetWatchArmOpts {
   stateHome: string;
   extDir: string;
@@ -186,9 +186,9 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
   const armScript = join(root, "bin", "fleet-watch-arm.sh");
   const drainScript = join(root, "bin", "fleet-wake-drain.sh");
 
-  // Fail soft se lo script non esiste ancora (altri task paralleli non finiti)
+  // Fail soft if the script does not exist yet (parallel tasks not finished)
   if (!existsSync(armScript)) {
-    const msg = `fleet-watch-arm: skip — ${armScript} non trovato (fallback in-process)`;
+    const msg = `fleet-watch-arm: skip — ${armScript} not found (in-process fallback)`;
     try { (pi as unknown as { logger?: { warn: (m: string) => void } }).logger?.warn(msg); } catch { /* ignore */ }
     console.warn(`[pi-fleet] ${msg}`);
     return { ok: false, message: msg };
@@ -206,12 +206,12 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
   }
   function getFleetGroupSync(): typeof import("./fleet-group.js") | null { return _fleetGroup; }
   void getFleetGroup().catch(() => {});
-  // rebuild iniziale best-effort (sync se già caricato, altrimenti async)
+  // initial best-effort rebuild (sync if already loaded, otherwise async)
   void (async () => {
     try {
       const mod = await getFleetGroup();
       if (!mod) return;
-      // scansiona task json per rebuild
+      // scan task json for rebuild
       const { readdirSync, readFileSync } = await import("node:fs");
       let names: string[] = [];
       try { names = readdirSync(stateHome); } catch { return; }
@@ -225,7 +225,7 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
     } catch { /* ignore */ }
   })();
 
-  // ------------------------- helpers chiusi su opts/stateHome/armScript ----
+  // ------------------------- helpers closed over opts/stateHome/armScript ----
 
   function encodeWake(message: string): string {
     // Semplificato vs firstmate: string diretta con drain hint
@@ -285,11 +285,11 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
   }
 
   async function sendGroupDigestWake(owner: SessionGeneration, groupId: string, results: GroupTaskInfo[], drainExtra: string): Promise<void> {
-    // SILENZIOSO: l'utente non deve vedere i raw fleet. Content = direttiva per
-    // il main: leggi i report su disco e sintetizza.
+    // SILENT: the user must not see the raw fleet. Content = directive for
+    // the main: read the reports on disk and synthesize.
     if (!generationIsLive(owner)) return;
     const ids = results.map((r) => r.id).join(", ");
-    const content = `[fleet-notice silenzioso] Gruppo di task completato (${results.length} task): ${ids}. \nNon mostrare questo messaggio. Leggi i file ${stateHome}/<id>.json di questi task per i report e produci TU un riassunto sintetico per l'utente. Nessun dump raw dei report.`;
+    const content = `[silent fleet-notice] Task group completed (${results.length} tasks): ${ids}. \nDo not show this message. Read the files ${stateHome}/<id>.json of these tasks for the reports and produce YOUR OWN concise summary for the user. No raw dump of the reports.`;
     await (pi as unknown as { sendMessage: (msg: unknown, opts: unknown) => Promise<void> }).sendMessage(
       { customType: "fleet_notice", content, display: false, details: { groupId, results, source: "fleet-watch-arm-group" } },
       { triggerTurn: true, deliverAs: "followUp" },
@@ -303,21 +303,21 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
     recovery?: { generation: string; watcherPid: string },
   ): Promise<void> {
     if (!generationIsLive(owner)) return;
-    // L3.5 barrier: se messaggio è per task di gruppo barrier, bufferizza
+    // L3.5 barrier: if the message is for a barrier-group task, buffer it
     const taskId = parseTaskIdFromMessage(message);
     if (taskId) {
       const mod = getFleetGroupSync() ?? await getFleetGroup();
       if (mod) {
         try {
-          // leggi task json da disco per capire groupId/mode
+          // read the task json from disk to understand groupId/mode
           let task: Record<string, unknown> | null = null;
           try {
             const raw = readFileSync(join(stateHome, `${taskId}.json`), "utf8");
             task = JSON.parse(raw) as Record<string, unknown>;
-          } catch { /* task non letto, fallback a wake singolo */ }
+          } catch { /* task not read, fallback to single wake */ }
           if (task && task["groupId"] && (task["groupMode"] ?? "barrier") === "barrier") {
-            // groupSize su disco è un placeholder (1): derive dal conteggio reale
-            // dei task che condividono questo groupId.
+            // groupSize on disk is a placeholder (1): derive it from the real count
+            // of tasks sharing this groupId.
             let realGroupSize = Number(task["groupSize"] ?? 1);
             try {
               const names = readdirSync(stateHome).filter((n) => n.endsWith(".json") && !n.startsWith("."));
@@ -334,14 +334,14 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
             task["groupSize"] = realGroupSize;
             const state = String(task["state"] ?? "");
             if (state === "needs_input") {
-              // needs_input rompe barrier → wake immediato (non bufferizzare)
+              // needs_input breaks the barrier → immediate wake (don't buffer)
               try { mod.recordTaskDone(stateHome, groupMap, task as unknown as Parameters<typeof mod.recordTaskDone>[2]); } catch { /* ignore */ }
-              // continua al flusso normale (consegna wake)
+              // continue to the normal flow (wake delivery)
             } else if (state === "done" || state === "failed") {
               const ev = mod.recordTaskDone(stateHome, groupMap, task as unknown as Parameters<typeof mod.recordTaskDone>[2]);
               if (ev.kind === "buffered") {
-                // barrier: non consegnare wake singolo, successore già riarmato da restoreAfterActionableClose
-                // Conferma handling se presente, poi esci senza sendMessage
+                // barrier: do not deliver a single wake, successor already re-armed by restoreAfterActionableClose
+                // Confirm handling if present, then exit without sendMessage
                 if (recovery) {
                   const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
                   if (!confirmed.ok && !pidAlive(recovery.watcherPid)) await retireArm(owner.child);
@@ -372,10 +372,10 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
               }
             }
           }
-        } catch { /* fail soft → wake singolo */ }
+        } catch { /* fail soft → single wake */ }
       }
     }
-    // Fallback: wake singolo (retrocompatibile)
+    // Fallback: single wake (backward compatible)
     let drainExtra = "";
     if (existsSync(drainScript)) {
       try {
@@ -621,7 +621,7 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
     };
   }
 
-  // Drain iniziale di eventuali wake pendenti (Pi era chiuso)
+  // Initial drain of any pending wakes (Pi was closed)
   function drainPendingAtStartup(): void {
     if (!existsSync(drainScript)) return;
     try {
@@ -633,7 +633,7 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
       });
       const count = Number((r.stdout || "").trim());
       if (count > 0) {
-        // c'è roba vera: drena con dettaglio per il wake
+        // there is real stuff: drain with detail for the wake
         const detail = spawnSync("bash", [drainScript], {
           cwd: root,
           encoding: "utf8",
@@ -656,7 +656,7 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
     }
     markLoaded(stateHome);
     drainPendingAtStartup();
-    // Se non c'è già un child/retry, prova ad armare (fail soft se lock missing)
+    // If there is no child/retry yet, try to arm (fail soft if the lock is missing)
     if (!generation.child && !generation.retryTimer) {
       const res = startArm(generation);
       if (!res.ok && !/read-only|not armed/.test(res.message)) {
@@ -679,7 +679,7 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
   try {
     const evOn = (pi as unknown as { events?: { on?: (e: string, h: () => void) => void } }).events?.on;
     if (typeof evOn === "function") {
-      // already handled via pi.on; evita doppia registrazione se stesso emitter
+      // already handled via pi.on; avoid double registration if the same emitter
     }
   } catch { /* ignore */ }
 
@@ -698,7 +698,7 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
     },
   });
 
-  // Registra anche command se disponibile
+  // Also register a command if available
   try {
     const rc = (pi as unknown as { registerCommand?: (name: string, def: unknown) => void }).registerCommand;
     if (typeof rc === "function") {
@@ -714,7 +714,7 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
 
   markLoaded(stateHome);
   drainPendingAtStartup();
-  // Arm iniziale: best-effort, fail soft se lock non owned
+  // Initial arm: best-effort, fail soft if the lock is not owned
   const initial = startArm(generation);
   if (!initial.ok && !/read-only|not armed/.test(initial.message)) {
     console.warn(`[pi-fleet] watch-arm initial: ${initial.message}`);
@@ -723,5 +723,5 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
   return initial;
 }
 
-// Alias per compatibilità con spec alternativa
+// Alias for compat with the alternative spec
 export const createFleetWatchArm = mountFleetWatchArm;

@@ -3,12 +3,12 @@
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-// ------------------------------------------------------------------ tipi ---
+// ------------------------------------------------------------------ types ---
 
-/** Verdetto scritto nel registro per una transizione rilevante del task. */
+/** Verdict written to the registry for a relevant task transition. */
 export type OutcomeVerdict = "done" | "failed" | "aborted" | "needs_input";
 
-/** Riga del registro append-only branch-outcomes.jsonl (una riga = un JSON). */
+/** Line of the append-only branch-outcomes.jsonl registry (one line = one JSON). */
 export interface BranchOutcome {
   ts: number;
   taskId: string;
@@ -22,8 +22,8 @@ export interface BranchOutcome {
 }
 
 /**
- * Shape minima del task richiesta da appendOutcome, allineata a TaskStateFile
- * (index.ts / fleet-group.ts) ma senza dipendenza statica sull'uno o sull'altro.
+ * Minimal task shape required by appendOutcome, aligned with TaskStateFile
+ * (index.ts / fleet-group.ts) but without a static dependency on either.
  */
 export interface OutcomeTask {
   id: string;
@@ -47,10 +47,9 @@ export interface OutcomeQuery {
 // ------------------------------------------------------------------ dedup ---
 
 /**
- * Dedup in-process: Map<taskId + verdict + doneAt, true>.
- * La stessa transizione non viene scritta due volte — né nelle chiamate
- * duplicate dello stesso processo né nel caso watcher+reconcile tocchino
- * lo stesso task nello stesso giro.
+ * In-process dedup: Map<taskId + verdict + doneAt, true>.
+ * The same transition is never written twice — neither on duplicate calls from
+ * the same process nor when watcher+reconcile touch the same task in the same round.
  */
 const _seen = new Map<string, true>();
 
@@ -60,7 +59,7 @@ function dedupKey(taskId: string, verdict: OutcomeVerdict, ts: number): string {
 
 // ------------------------------------------------------------------ file ---
 
-/** Path del registro: <stateHome>/branch-outcomes.jsonl (append-only). */
+/** Registry path: <stateHome>/branch-outcomes.jsonl (append-only). */
 export function outcomesFile(stateHome: string): string {
   return join(stateHome, "branch-outcomes.jsonl");
 }
@@ -73,22 +72,22 @@ function verdictFor(state: string): OutcomeVerdict | null {
     case "needs_input":
       return state;
     default:
-      // spawning/running/altro: transizione non rilevante → niente riga
+      // spawning/running/other: not a relevant transition → no line
       return null;
   }
 }
 
 /**
- * Appende una riga al registro (best-effort, sync).
+ * Appends a line to the registry (best-effort, sync).
  *
- * - Dedup in memoria per (taskId, verdict, doneAt): la stessa transizione
- *   può arrivare da più hook (watcher, reconcile, fleet_abort) ma viene
- *   scritta una volta sola.
- * - Campi sempre presenti; reportPath null se assente sul task.
- * - fs.appendFileSync con weak retry (1 riprova); qualsiasi errore
- *   viene inghiottito: il registro non deve MAI rompere il wake.
+ * - In-memory dedup by (taskId, verdict, doneAt): the same transition
+ *   can arrive from multiple hooks (watcher, reconcile, fleet_abort) but is
+ *   written only once.
+ * - Fields always present; reportPath null if absent on the task.
+ * - fs.appendFileSync with weak retry (1 retry); any error is swallowed:
+ *   the registry must NEVER break the wake.
  *
- * @returns true se la riga è stata scritta, false se duplicata/saltata/errore.
+ * @returns true if the line was written, false if duplicated/skipped/error.
  */
 export function appendOutcome(stateHome: string, task: OutcomeTask): boolean {
   try {
@@ -117,26 +116,26 @@ export function appendOutcome(stateHome: string, task: OutcomeTask): boolean {
         appendFileSync(file, payload, "utf8");
         written = true;
       } catch {
-        // weak retry: al secondo tentativo fallito si rinuncia (best-effort)
+        // weak retry: give up on the second failed attempt (best-effort)
         if (attempt === 1) return false;
       }
     }
     if (written) _seen.set(key, true);
     return written;
   } catch {
-    // mai propagare: il chiamante è nel percorso di wake/digest
+    // never propagate: the caller is on the wake/digest path
     return false;
   }
 }
 
 /**
- * Legge il registro, filtra e ritorna le ultime N righe (limite default 20)
- * in ordine cronologico (= ordine del file, append-only).
+ * Reads the registry, filters and returns the last N lines (default limit 20)
+ * in chronological order (= file order, append-only).
  *
- * - project: match parziale (case-sensitive) sul percorso del progetto.
+ * - project: partial (case-sensitive) match on the project path.
  * - verdict: done|failed|aborted|needs_input.
- * - fromTs: solo righe con ts >= fromTs.
- * - Righe corrotte: ignorate (append-only, mai toccare il file).
+ * - fromTs: only lines with ts >= fromTs.
+ * - Corrupted lines: ignored (append-only, never touch the file).
  */
 export function queryOutcomes(stateHome: string, opts: OutcomeQuery = {}): string[] {
   const { limit = 20, project, verdict, fromTs } = opts;
@@ -145,7 +144,7 @@ export function queryOutcomes(stateHome: string, opts: OutcomeQuery = {}): strin
   try {
     raw = readFileSync(file, "utf8");
   } catch {
-    // file non ancora creato → nessun risultato
+    // file not created yet → no results
     return [];
   }
   const lines = raw.split("\n").filter((l) => l.trim().length > 0);
@@ -159,7 +158,7 @@ export function queryOutcomes(stateHome: string, opts: OutcomeQuery = {}): strin
       if (verdict && o.verdict !== verdict) continue;
       matched.push(line);
     } catch {
-      // riga corrotta o a metà scrittura — ignora
+      // corrupted or mid-write line — ignore
     }
   }
   return matched.slice(-Math.max(1, limit));

@@ -11,63 +11,63 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-// ------------------------------------------------------------------ tipi ---
+// ------------------------------------------------------------------ types ---
 
 /**
- * Messaggio del task inbox persistito su disco (stile fleet-group.ts: funzioni
- * sync, readFileSync/writeFileSync, try/catch soft — nessuna dipendenza da
- * herdr: la consegna è iniettata come callback).
+ * Task inbox message persisted on disk (fleet-group.ts style: sync
+ * functions, readFileSync/writeFileSync, soft try/catch — no dependency on
+ * herdr: delivery is injected as a callback).
  *
- * Contratto su disco (directory `$STATE_HOME/<taskId>.inbox/`):
+ * On-disk contract (directory `$STATE_HOME/<taskId>.inbox/`):
  * - `<seq>.json` = { "seq": N, "message": "...", "createdAt": ms,
- *                    "acked": false, "replays": 0 }  (+ campi opzionali)
- * - ack: il figlio crea il file vuoto `<seq>.acked` dopo aver letto/applicato
- *   il messaggio; il watcher sposta il json in `handled/` (markAcked).
- * - seq sequenziali: max esistente (inbox + handled) + 1.
+ *                    "acked": false, "replays": 0 }  (+ optional fields)
+ * - ack: the child creates the empty file `<seq>.acked` after reading/applying
+ *   the message; the watcher moves the json to `handled/` (markAcked).
+ * - sequential seq: max existing (inbox + handled) + 1.
  */
 export interface InboxMsg {
-  /** Numero di sequenza (max esistente + 1). */
+  /** Sequence number (max existing + 1). */
   seq: number;
-  /** Contenuto del messaggio (testo del fleet_steer). */
+  /** Message content (the fleet_steer text). */
   message: string;
-  /** Epoch ms dell'enqueue. */
+  /** Epoch ms of the enqueue. */
   createdAt: number;
-  /** Sempre false nel file: l'ack è il marker `<seq>.acked` (il json va in handled/). */
+  /** Always false in the file: the ack is the `<seq>.acked` marker (the json goes to handled/). */
   acked: boolean;
-  /** Quante volte il messaggio è stato consegnato (deliver) finora. */
+  /** How many times the message has been delivered (deliver) so far. */
   replays: number;
-  /** Epoch ms dell'ultimo deliver (impostato da deliver). */
+  /** Epoch ms of the last deliver (set by deliver). */
   lastReplayAt?: number;
-  /** replay:false ⇒ fire-and-forget: consegna singola, MAI re-ringato. */
+  /** replay:false ⇒ fire-and-forget: single delivery, NEVER re-rung. */
   fireAndForget?: boolean;
-  /** true dopo l'escalation: il messaggio resta su disco ma non viene più ringato. */
+  /** true after escalation: the message stays on disk but is no longer re-rung. */
   escalated?: boolean;
 }
 
-/** Callback di consegna del testo al figlio (herdr agent prompt), iniettata per mantenere il modulo puro. */
+/** Text delivery callback to the child (herdr agent prompt), injected to keep the module pure. */
 export type SendFn = (message: string) => boolean | PromiseLike<boolean>;
 
-/** Callback di consegna per reRing: riceve il messaggio completo, ritorna esito. */
+/** Delivery callback for reRing: receives the full message, returns the outcome. */
 export type DeliverFn = (msg: InboxMsg) => boolean | PromiseLike<boolean>;
 
 export interface ReRingOptions {
   stateHome: string;
   taskId: string;
-  /** Consegna effettiva e REGISTRAZIONE del replay: deve aggiornare replays++/lastReplayAt su disco (di norma `deliver(stateHome, taskId, seq, send)` bindato), altrimenti l'escalation non scatta mai. */
+  /** Actual delivery AND replay REGISTRATION: must update replays++/lastReplayAt on disk (normally the bound `deliver(stateHome, taskId, seq, send)`), otherwise the escalation never fires. */
   deliver: DeliverFn;
-  /** Intervallo minimo tra un replay e il successivo (default 60_000 ms). */
+  /** Minimum interval between one replay and the next (default 60_000 ms). */
   intervalMs?: number;
-  /** Numero massimo di replay prima dell'escalation (default 5). */
+  /** Max number of replays before escalation (default 5). */
   maxReplays?: number;
-  /** Chiamato UNA volta per messaggio quando replays >= maxReplays (il messaggio resta su disco). */
+  /** Called ONCE per message when replays >= maxReplays (the message stays on disk). */
   onEscalation?: (taskId: string, msg: InboxMsg) => void;
-  /** Chiamato quando il loop termina da solo (niente più messaggi ringabili) o via stop(). */
+  /** Called when the loop ends on its own (no more ringable messages) or via stop(). */
   onIdle?: (taskId: string) => void;
 }
 
-// ----------------------------------------------------------- helpers base ---
+// ----------------------------------------------------------- base helpers ---
 
-/** Directory inbox di un task: `$STATE_HOME/<taskId>.inbox/`. */
+/** Inbox directory of a task: `$STATE_HOME/<taskId>.inbox/`. */
 export function inboxDir(stateHome: string, taskId: string): string {
   return join(stateHome, `${taskId}.inbox`);
 }
@@ -84,7 +84,7 @@ function ackPath(stateHome: string, taskId: string, seq: number): string {
   return join(inboxDir(stateHome, taskId), `${seq}.acked`);
 }
 
-/** Legge un messaggio; file mancante/corrotto → null (fail soft). */
+/** Reads a message; missing/corrupted file → null (fail soft). */
 function readMsg(stateHome: string, taskId: string, seq: number): InboxMsg | null {
   try {
     const raw = readFileSync(msgPath(stateHome, taskId, seq), "utf8");
@@ -105,7 +105,7 @@ function readMsg(stateHome: string, taskId: string, seq: number): InboxMsg | nul
   }
 }
 
-/** Scrittura atomica (tmp + rename), crea la dir se mancante. */
+/** Atomic write (tmp + rename), creates the dir if missing. */
 function writeMsg(stateHome: string, taskId: string, msg: InboxMsg): void {
   const dir = inboxDir(stateHome, taskId);
   mkdirSync(dir, { recursive: true });
@@ -116,8 +116,8 @@ function writeMsg(stateHome: string, taskId: string, msg: InboxMsg): void {
 }
 
 /**
- * Prossimo seq: max tra inbox dir e handled (mantiene la monotonia anche dopo
- * lo spostamento in handled/). File corrotti/estranei → ignorati.
+ * Next seq: max between inbox dir and handled (keeps monotonicity even after
+ * the move to handled/). Corrupted/foreign files → ignored.
  */
 function nextSeq(stateHome: string, taskId: string): number {
   let max = 0;
@@ -142,9 +142,9 @@ function nextSeq(stateHome: string, taskId: string): number {
 // -------------------------------------------------------------- API ---
 
 /**
- * Accoda un messaggio sul disco (scrittura ATOMICA tmp+rename). Seq = max
- * esistente + 1. `replay:false` ⇒ campo `fireAndForget:true` (il messaggio
- * viene consegnato una volta ma MAI re-ringato). Sentiero d'errore → {ok:false}.
+ * Queues a message on disk (ATOMIC tmp+rename write). Seq = max existing + 1.
+ * `replay:false` ⇒ `fireAndForget:true` field (the message is delivered once
+ * but NEVER re-rung). Error path → {ok:false}.
  */
 export function enqueue(
   stateHome: string,
@@ -165,15 +165,15 @@ export function enqueue(
     writeMsg(stateHome, taskId, msg);
     return { ok: true, seq };
   } catch {
-    // fail soft: niente crash del chiamante
+    // fail soft: no crash of the caller
     return { ok: false, seq };
   }
 }
 
 /**
- * Messaggi pendenti non ackati, ordinati per seq crescente. Un messaggio con
- * il marker `<seq>.acked` presente NON è più pendente (anche se il json non è
- * ancora stato spostato in handled/).
+ * Pending non-acked messages, sorted by ascending seq. A message with the
+ * `<seq>.acked` marker present is NOT pending anymore (even if the json has
+ * not yet been moved to handled/).
  */
 export function listPending(stateHome: string, taskId: string): InboxMsg[] {
   let names: string[] = [];
@@ -187,7 +187,7 @@ export function listPending(stateHome: string, taskId: string): InboxMsg[] {
     if (!name.endsWith(".json")) continue;
     const seq = Number.parseInt(name.slice(0, -5), 10);
     if (!Number.isFinite(seq)) continue;
-    if (existsSync(ackPath(stateHome, taskId, seq))) continue; // ackato
+    if (existsSync(ackPath(stateHome, taskId, seq))) continue; // acked
     const msg = readMsg(stateHome, taskId, seq);
     if (msg) out.push(msg);
   }
@@ -196,9 +196,9 @@ export function listPending(stateHome: string, taskId: string): InboxMsg[] {
 }
 
 /**
- * Consegna un messaggio pendente: invoca la callback `send` (herdr agent
- * prompt) e, a successo, aggiorna `replays++` / `lastReplayAt` su disco.
- * Send fallito o throw → false (replays invariati, il prossimo giro ritenta).
+ * Delivers a pending message: invokes the `send` callback (herdr agent
+ * prompt) and, on success, updates `replays++` / `lastReplayAt` on disk.
+ * Failed send or throw → false (replays unchanged, next round retries).
  */
 export async function deliver(
   stateHome: string,
@@ -220,15 +220,15 @@ export async function deliver(
     try {
       writeMsg(stateHome, taskId, msg);
     } catch {
-      // soft: il conteggio replica si perde, il prossimo giro ricomincia
+      // soft: the replay count is lost, the next round restarts it
     }
   }
   return ok;
 }
 
 /**
- * Sposta un messaggio ackato in `handled/` e rimuove il marker `<seq>.acked`.
- * Richiede che il marker esista; altrimenti false.
+ * Moves an acked message to `handled/` and removes the `<seq>.acked` marker.
+ * Requires the marker to exist; otherwise false.
  */
 export function markAcked(stateHome: string, taskId: string, seq: number): boolean {
   const ack = ackPath(stateHome, taskId, seq);
@@ -248,14 +248,14 @@ export function markAcked(stateHome: string, taskId: string, seq: number): boole
 }
 
 /**
- * Loop di re-ring per un task (un timer per task; ritorna la stop() per il
- * guard del chiamante). Ogni giro:
- *  - sposta in handled/ i messaggi ackati (marker `<seq>.acked`);
- *  - per ogni pendente: se da >= intervalMs dall'ultimo replay e replays<max →
- *    deliver; se replays>=max → onEscalation (UNA volta, `escalated:true`) e
- *    smette di ringare quel messaggio (resta su disco);
- *  - fire-and-forget: mai ringato (solo consegna singola all'enqueue);
- *  - quando non resta più nulla di ringabile → termina e chiama onIdle.
+ * Re-ring loop for a task (one timer per task; returns the stop() for the
+ * caller's guard). Each round:
+ *  - moves acked messages to handled/ (marker `<seq>.acked`);
+ *  - for each pending: if >= intervalMs since last replay and replays<max →
+ *    deliver; if replays>=max → onEscalation (ONCE, `escalated:true`) and
+ *    stops ringing that message (it stays on disk);
+ *  - fire-and-forget: never rung (only single delivery at enqueue);
+ *  - when nothing ringable remains → terminates and calls onIdle.
  */
 export function reRing(opts: ReRingOptions): () => void {
   const { stateHome, taskId, deliver, onEscalation, onIdle } = opts;
@@ -305,9 +305,9 @@ export function reRing(opts: ReRingOptions): () => void {
   const tick = async (): Promise<void> => {
     if (stopped) return;
     try {
-      // 1. sposta in handled/ i messaggi ackati (marker <seq>.acked). NOTA:
-      // scan su TUTTI i *.json (listPending esclude i già ackati, quindi va
-      // letta la directory direttamente).
+      // 1. move acked messages to handled/ (marker <seq>.acked). NOTE:
+      // scan of ALL *.json (listPending excludes already-acked, so the
+      // directory must be read directly).
       let names: string[] = [];
       try {
         names = readdirSync(inboxDir(stateHome, taskId));
@@ -326,19 +326,19 @@ export function reRing(opts: ReRingOptions): () => void {
           }
         }
       }
-      // 2. escalation sweep (copre anche messaggi già a replays>=max da run
-      //    precedenti: esculati una sola volta, `escalated:true` resta su disco)
+      // 2. escalation sweep (also covers messages already at replays>=max from
+      //    previous runs: escalated only once, `escalated:true` stays on disk)
       const pending = listPending(stateHome, taskId);
       escalateIfDue(pending);
       const ringableCount = pending.filter(
         (m) => !m.fireAndForget && (m.replays ?? 0) < maxReplays,
       ).length;
       if (ringableCount === 0) {
-        // niente da ringare (tutto ackato/fire-and-forget/escalation) → fine
+        // nothing to ring (all acked/fire-and-forget/escalation) → done
         stop();
         return;
       }
-      // 3. delivery loop: solo messaggi non ackati, non escalation, dovuti
+      // 3. delivery loop: only non-acked, non-escalated, due messages
       for (const msg of pending) {
         if (msg.fireAndForget) continue;
         if ((msg.replays ?? 0) >= maxReplays) continue;
@@ -347,12 +347,12 @@ export function reRing(opts: ReRingOptions): () => void {
           try {
             await deliver(msg);
           } catch {
-            /* soft: il giro dopo ritenta */
+            /* soft: the next round retries */
           }
         }
       }
-      // 4. se un deliver ha appena portato replays a max, escalation SUBITO
-      //    (altrimenti il loop si fermerebbe senza mai esculare il messaggio)
+      // 4. if a deliver just brought replays to max, escalate NOW
+      //    (otherwise the loop would stop without ever escalating the message)
       if (stopped) return;
       escalateIfDue(listPending(stateHome, taskId));
       const stillRingable = listPending(stateHome, taskId).some(
@@ -365,13 +365,13 @@ export function reRing(opts: ReRingOptions): () => void {
         stop();
       }
     } catch {
-      // fail soft: il re-ring non deve mai far crashare il watcher
+      // fail soft: the re-ring must never crash the watcher
       if (!stopped) schedule(intervalMs);
     }
   };
 
-  // primo giro immediato (di norma niente da consegnare: la consegna immediata
-  // è già avvenuta in fleet_steer; qui si governa il RE-ring)
+  // first immediate round (normally nothing to deliver: the immediate delivery
+  // already happened in fleet_steer; here the RE-ring is governed)
   schedule(0);
   return stop;
 }

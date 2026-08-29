@@ -1,4 +1,4 @@
-/** pi-fleet · preferenze capitano e learnings persistenti (5b.5) */
+/** pi-fleet · captain preferences and persistent learnings (5b.5) */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -6,31 +6,31 @@ import { join } from "node:path";
 // ------------------------------------------------------------------ file ---
 
 /**
- * Layout runtime-globale in STATE_HOME (~/.pi/fleet), MAI in git:
- *  - captain.md         → preferenze locali a questa macchina (righe "chiave: valore")
- *  - captain-shared.md  → preferenze condivisibili (per il futuro secondmate)
- *  - learnings.md       → entry datate "## YYYY-MM-DD — titolo" + Fatto/Implicazione
+ * Runtime-global layout in STATE_HOME (~/.pi/fleet), NEVER in git:
+ *  - captain.md         → preferences local to this machine ("key: value" lines)
+ *  - captain-shared.md  → shareable preferences (for the future secondmate)
+ *  - learnings.md       → dated entries "## YYYY-MM-DD — title" + Fact/Implication
  */
 
-const CAPTAIN_HEADER = `# Preferenze capitano
-# Preferenze locali a questa macchina (runtime-globale, mai in git).
-# Formato: righe "chiave: valore", commenti #, sezioni ## libere.
+const CAPTAIN_HEADER = `# Captain preferences
+# Preferences local to this machine (runtime-global, never in git).
+# Format: "key: value" lines, # comments, free ## sections.
 <!-- memory tiers: see fleet-stow-lite (T-012) -->
 `;
 
-const CAPTAIN_SHARED_HEADER = `# Preferenze capitano (condivise)
-# Preferenze condivisibili (per il futuro secondmate).
-# Formato: righe "chiave: valore", commenti #, sezioni ## libere.
+const CAPTAIN_SHARED_HEADER = `# Captain preferences (shared)
+# Shareable preferences (for the future secondmate).
+# Format: "key: value" lines, # comments, free ## sections.
 <!-- memory tiers: see fleet-stow-lite (T-012) -->
 `;
 
-const LEARNINGS_HEADER = `# Learnings operativi
-# Fatti operativi evidence-backed accumulati dalle sessioni.
-# Formato: "## YYYY-MM-DD — titolo", poi "Fatto: ..." e "Implicazione: ...".
+const LEARNINGS_HEADER = `# Operational learnings
+# Evidence-backed operational facts accumulated from sessions.
+# Format: "## YYYY-MM-DD — title", then "Fact: ..." and "Implication: ...".
 <!-- memory tiers: see fleet-stow-lite (T-012) -->
 `;
 
-// T-012 — header-pointer per i tier di pruning (una riga, idempotente).
+// T-012 — header pointer for the pruning tiers (one line, idempotent).
 const TIER_POINTER = "<!-- memory tiers: see fleet-stow-lite (T-012) -->";
 
 function archivePath(stateHome: string): string {
@@ -53,7 +53,7 @@ function learningsPath(stateHome: string): string {
   return join(stateHome, "learnings.md");
 }
 
-/** Scrittura atomica tmp+rename (stesso pattern di persistGroup). */
+/** Atomic write tmp+rename (same pattern as persistGroup). */
 function atomicWrite(path: string, content: string): void {
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, content, "utf8");
@@ -64,11 +64,11 @@ function readLines(path: string): string[] {
   try {
     return readFileSync(path, "utf8").split("\n");
   } catch (e) {
-    throw new Error(`impossibile leggere ${path}: ${e instanceof Error ? e.message : String(e)}`);
+    throw new Error(`unable to read ${path}: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
-/** Variante best-effort: file assente → lista vuota (mai lancia). */
+/** Best-effort variant: missing file → empty list (never throws). */
 function readLinesSafe(path: string): string[] {
   try {
     return readLines(path);
@@ -89,8 +89,8 @@ function writeIfMissing(path: string, content: string): void {
 }
 
 /**
- * Header-pointer T-012: aggiunge la riga `<!-- memory tiers: ... -->` se assente,
- * subito dopo il blocco di header contiguo (commenti `#` / marker). Idempotente.
+ * T-012 header pointer: adds the `<!-- memory tiers: ... -->` line if absent,
+ * right after the contiguous header block (# comments / markers). Idempotent.
  */
 function ensureTierPointer(stateHome: string, path: string): void {
   try {
@@ -113,7 +113,7 @@ function ensureTierPointer(stateHome: string, path: string): void {
 
 // ------------------------------------------------------------- helpers ---
 
-/** Parsa una riga "chiave: valore" (commenti/header ignorati). Ritorna null se non è una riga di pref. */
+/** Parses a "key: value" line (comments/header ignored). Returns null if not a pref line. */
 function parsePrefLine(line: string): { key: string; value: string } | null {
   const m = /^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/.exec(line.trim());
   if (!m) return null;
@@ -133,9 +133,9 @@ function isRecent(dateStr: string, now: number): boolean {
 // ------------------------------------------------------------- API ---
 
 export interface PrefOpts {
-  /** true → file captain-shared.md; false (default) → captain.md */
+  /** true → captain-shared.md file; false (default) → captain.md */
   shared?: boolean;
-  /** sezione "## ..." sotto cui apporre la chiave se nuova (opzionale) */
+  /** "## ..." section under which to place a new key (optional) */
   section?: string;
 }
 
@@ -144,7 +144,7 @@ function prefsFile(stateHome: string, opts?: PrefOpts): string {
 }
 
 /**
- * Crea i tre file con header se assenti. Best-effort: non lancia mai verso l'alto.
+ * Creates the three files with headers if absent. Best-effort: never throws upward.
  */
 export function ensureFiles(stateHome: string): void {
   try {
@@ -152,7 +152,7 @@ export function ensureFiles(stateHome: string): void {
     writeIfMissing(captainPath(stateHome), CAPTAIN_HEADER);
     writeIfMissing(captainSharedPath(stateHome), CAPTAIN_SHARED_HEADER);
     writeIfMissing(learningsPath(stateHome), LEARNINGS_HEADER);
-    // T-012 — header-pointer sui file esistenti (al primo pass/session_start)
+    // T-012 — header pointer on existing files (at first pass/session_start)
     ensureTierPointer(stateHome, captainPath(stateHome));
     ensureTierPointer(stateHome, captainSharedPath(stateHome));
     ensureTierPointer(stateHome, learningsPath(stateHome));
@@ -162,7 +162,7 @@ export function ensureFiles(stateHome: string): void {
 }
 
 /**
- * Contenuto di captain.md (per digest/bootstrap). "" se assente o illeggibile.
+ * Content of captain.md (for digest/bootstrap). "" if absent or unreadable.
  */
 export function readCaptain(stateHome: string): string {
   try {
@@ -173,8 +173,8 @@ export function readCaptain(stateHome: string): string {
 }
 
 /**
- * Valore della chiave in captain.md (o captain-shared.md con opts.shared).
- * Ritorna null se la chiave non esiste o il file non è leggibile.
+ * Value of the key in captain.md (or captain-shared.md with opts.shared).
+ * Returns null if the key does not exist or the file is not readable.
  */
 export function getPref(stateHome: string, key: string, opts?: PrefOpts): string | null {
   try {
@@ -192,10 +192,10 @@ export function getPref(stateHome: string, key: string, opts?: PrefOpts): string
 }
 
 /**
- * Aggiorna o aggiunge "chiave: valore" in captain.md (o captain-shared.md).
- * - chiave esistente (case-insensitive) → sostituisce SOLO la riga, ordine e commenti intatti;
- * - chiave nuova → appende in coda (o sotto la sezione `## <opts.section>` se richiesta).
- * Scrittura atomica tmp+rename. Ritorna path e riga scritta.
+ * Updates or adds "key: value" in captain.md (or captain-shared.md).
+ * - existing key (case-insensitive) → replaces ONLY the line, order and comments intact;
+ * - new key → appends at the end (or under the `## <opts.section>` section if requested).
+ * Atomic tmp+rename write. Returns path and the written line.
  */
 export function setPref(
   stateHome: string,
@@ -205,7 +205,7 @@ export function setPref(
 ): { path: string; line: string } {
   const path = prefsFile(stateHome, opts);
   const k = key.trim();
-  if (!k) throw new Error("chiave vuota");
+  if (!k) throw new Error("empty key");
   const keyLine = `${k}: ${value}`;
   ensureFiles(stateHome);
   const lines = readLines(path);
@@ -218,7 +218,7 @@ export function setPref(
       return { path, line: keyLine };
     }
   }
-  // chiave nuova: appendi (sotto la sezione richiesta, se c'è)
+  // new key: append (under the requested section, if any)
   while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
   const section = opts?.section?.trim();
   if (!section) {
@@ -250,18 +250,18 @@ export function setPref(
 }
 
 /**
- * Tier di decay per una entry (markers embedded, identici a stow):
- *  - aging      → marker `<!--a:YYYY-MM-DD-->`, stale a ≥30 giorni → refresh/archivio;
- *  - perishable → marker `<!--p:YYYY-MM-DD-->`, stale a ≥7 giorni, richiede `expiry`;
- *  - pinned     → marker `<!--pin-->` (in learnings), mai invecchia; default nei file captain.
+ * Decay tier for an entry (embedded markers, identical to stow):
+ *  - aging      → marker `<!--a:YYYY-MM-DD-->`, stale at ≥30 days → refresh/archive;
+ *  - perishable → marker `<!--p:YYYY-MM-DD-->`, stale at ≥7 days, requires `expiry`;
+ *  - pinned     → marker `<!--pin-->` (in learnings), never ages; default in captain files.
  */
 export type LearningTier = "aging" | "perishable" | "pinned";
 
 export interface LearningOpts {
-  /** tier di decay; default `aging` per learnings.md (pinned è il default dei file captain). */
+  /** decay tier; default `aging` for learnings.md (pinned is the default for captain files). */
   tier?: LearningTier;
-  /** condizione di scadenza leggibile e verificabile per `tier: "perishable"`
-   *  (es. "dopo il deploy di v0.4", "backlog #12", "attesa feedback entro 2026-09-15"). */
+  /** readable and verifyable expiry condition for `tier: "perishable"`
+   *  (e.g. "after the v0.4 deploy", "backlog #12", "awaiting feedback by 2026-09-15"). */
   expiry?: string;
 }
 
@@ -278,18 +278,18 @@ function tierMarkerLine(tier: LearningTier, date?: string): string {
 }
 
 /**
- * Appende una sezione datata a learnings.md:
+ * Appends a dated section to learnings.md:
  *
  *   ## YYYY-MM-DD — <title>
- *   Fatto: <fact>
- *   Implicazione: <implication>
- *   [Scadenza: <expiry>]        (solo tier perishable)
- *   <!--a:YYYY-MM-DD-->         (marker di tier, in coda all'entry; invisibile nel rendering)
+ *   Fact: <fact>
+ *   Implication: <implication>
+ *   [Expiry: <expiry>]          (only for perishable tier)
+ *   <!--a:YYYY-MM-DD-->         (tier marker at the end of the entry; invisible in rendering)
  *
- * T-012: parametro opzionale `opts` per il tier (default `aging`); `perishable`
- * richiede `expiry` (condizione leggibile). Dedup per titolo (case-insensitive)
- * nelle ultime 24h: se esiste, la sezione viene sostituita in place (quindi anche
- * il marker viene rigenerato = rinforzo) invece di duplicare. Ritorna path + replaced.
+ * T-012: optional `opts` param for the tier (default `aging`); `perishable`
+ * requires `expiry` (readable condition). Dedup by title (case-insensitive)
+ * within the last 24h: if it exists, the section is replaced in place (so the
+ * marker is regenerated = reinforcement) instead of duplicating. Returns path + replaced.
  */
 export function addLearning(
   stateHome: string,
@@ -300,28 +300,28 @@ export function addLearning(
 ): { path: string; replaced: boolean } {
   const path = learningsPath(stateHome);
   const t = title.trim();
-  if (!t) throw new Error("titolo vuoto");
+  if (!t) throw new Error("empty title");
   const f = fact.trim();
-  if (!f) throw new Error("fatto vuoto");
+  if (!f) throw new Error("empty fact");
   const tier = opts?.tier ?? "aging";
   if (tier === "perishable" && !opts?.expiry?.trim()) {
-    throw new Error("tier perishable richiede opts.expiry (condizione di scadenza leggibile)");
+    throw new Error("perishable tier requires opts.expiry (readable expiry condition)");
   }
   ensureFiles(stateHome);
   const lines = readLines(path);
   const today = new Date().toISOString().slice(0, 10);
   const headerLine = `## ${today} — ${t}`;
-  const body: string[] = [`Fatto: ${f}`];
+  const body: string[] = [`Fact: ${f}`];
   if (implication !== undefined && implication !== null && implication.trim() !== "") {
-    body.push(`Implicazione: ${implication.trim()}`);
+    body.push(`Implication: ${implication.trim()}`);
   }
   if (tier === "perishable" && opts?.expiry) {
-    // la prosa DEVE nominare la condizione di scadenza verificabile
-    body.push(`Scadenza: ${opts.expiry.trim()}`);
+    // the prose MUST name the verifyable expiry condition
+    body.push(`Expiry: ${opts.expiry.trim()}`);
   }
   body.push(tierMarkerLine(tier));
 
-  // dedup 24h: stessa sezione con titolo (case-insensitive) e data < 24h → sostituisci in place
+  // 24h dedup: same section with title (case-insensitive) and date < 24h → replace in place
   const lower = normalize(t);
   const now = Date.now();
   const parsed = parseLearningSections(lines);
@@ -342,7 +342,7 @@ export function addLearning(
     return { path, replaced: true };
   }
 
-  // append in coda
+  // append at the end
   while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
   lines.push("", headerLine, ...body);
   writeLines(path, lines);
@@ -352,8 +352,8 @@ export function addLearning(
 // ------------------------------------------------------------- stow (T-012) ---
 
 /**
- * Budget di avvio (tokens stimati). Report-only + archivio dei non-pinned più
- * vecchi quando sopra soglia: zero-config, file `startup-memory-budget` opzionale.
+ * Startup budget (estimated tokens). Report-only + archive of the oldest
+ * non-pinned entries when over the threshold: zero-config, optional `startup-memory-budget` file.
  */
 export interface StowBudget {
   limitTokens: number;
@@ -361,24 +361,24 @@ export interface StowBudget {
   overflow: boolean;
 }
 
-/** Report di un `stowPass`. */
+/** Report of a `stowPass`. */
 export interface StowReport {
   dryRun: boolean;
-  /** entry il cui marker datato è stato avanzato a oggi (refresh/rinforzo) */
+  /** entries whose dated marker was advanced to today (refresh/reinforcement) */
   refreshed: number;
-  /** entry uniche stale archiviate in memory-archive.md (mai delete di unici) */
+  /** unique stale entries archived in memory-archive.md (never delete uniques) */
   archived: number;
-  /** duplicati / fatti già posseduti rimossi */
+  /** duplicates / already-owned facts removed */
   removed: number;
-  /** entry archiviate per overflow di budget (sottoinsieme di archived) */
+  /** entries archived due to budget overflow (subset of archived) */
   overflow: number;
   budget: StowBudget;
-  /** conteggi pre-pass: captain.md / captain-shared.md → n. prefs, learnings.md → n. sezioni */
+  /** pre-pass counts: captain.md / captain-shared.md → n. prefs, learnings.md → n. sections */
   fileCounts: Record<string, number>;
 }
 
 export interface StowOptions {
-  /** true → solo report, zero scritture */
+  /** true → report only, zero writes */
   dryRun?: boolean;
 }
 
@@ -387,12 +387,12 @@ const PERISHABLE_STALE_DAYS = 7;
 const DEFAULT_BUDGET_TOKENS = 7500;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const ARCHIVE_HEADER = `# Archivio memorie (stow-lite)
-# Sezioni datate con Provenance (stowed | legacy-unvalidated | overflow).
-# Mai delete di unici: qui vivono le memorie non più attive, resta tutto recuperabile.
+const ARCHIVE_HEADER = `# Memory archive (stow-lite)
+# Dated sections with Provenance (stowed | legacy-unvalidated | overflow).
+# Never delete uniques: here live the no-longer-active memories, everything stays recoverable.
 `;
 
-/** Stima tokens da bytes: ceil(byte/3) come da spec. */
+/** Estimate tokens from bytes: ceil(byte/3) per spec. */
 function estimateTokens(text: string): number {
   return Math.ceil(Buffer.byteLength(text, "utf8") / 3);
 }
@@ -409,7 +409,7 @@ interface EntryMarker {
   date?: string;
 }
 
-/** Cerca il marker di tier nell'ultima parte del body di una sezione. */
+/** Looks for the tier marker in the last part of a section body. */
 function parseEntryMarker(body: string[]): EntryMarker | null {
   for (let i = body.length - 1; i >= 0; i--) {
     const l = body[i];
@@ -423,7 +423,7 @@ function parseEntryMarker(body: string[]): EntryMarker | null {
   return null;
 }
 
-/** Porta il marker datato della sezione a oggi (refresh); migra grace → aging; appende marker se assente. */
+/** Brings the section's dated marker to today (refresh); migrates grace → aging; appends marker if absent. */
 function refreshSectionMarkers(lines: string[], today: string): string[] {
   const out = lines.map((l) => {
     let v = l;
@@ -441,14 +441,14 @@ function refreshSectionMarkers(lines: string[], today: string): string[] {
   return collapseBlanks(out);
 }
 
-/** Blocco da appendere a memory-archive.md: sezione datata + Provenance + entry originale. */
+/** Block to append to memory-archive.md: dated section + Provenance + original entry. */
 function archiveSection(today: string, s: LearningSection, sectionLines: string[], provenance: string): string {
   const first = (sectionLines[0] ?? "").trim();
   const desc = first.replace(/^##\s+/, "").trim() || s.title;
   return [`## ${today} — ${desc}`, `Provenance: ${provenance}`, ...collapseBlanks(sectionLines)].join("\n");
 }
 
-/** Rimuove doppie righe vuote consecutive e blank finali. */
+/** Removes consecutive blank lines and trailing blanks. */
 function collapseBlanks(lines: string[]): string[] {
   const out: string[] = [];
   for (const l of lines) {
@@ -491,7 +491,7 @@ function readText(path: string): string {
   }
 }
 
-/** Appende i blocchi archivio a memory-archive.md (header se vuoto, scrittura atomica). */
+/** Appends archive blocks to memory-archive.md (header if empty, atomic write). */
 function appendArchive(stateHome: string, blocks: string[]): void {
   if (blocks.length === 0) return;
   const path = archivePath(stateHome);
@@ -502,22 +502,22 @@ function appendArchive(stateHome: string, blocks: string[]): void {
 }
 
 /**
- * Pass di pruning delle memorie (T-012, lite version di stow). Mai bloccante.
+ * Memory pruning pass (T-012, lite version of stow). Never blocking.
  *
- * - aging con marker ≥30gg → refresh (data=oggi, lite: di default confermata);
- * - perishable con marker ≥7gg → archivio in memory-archive.md (provenance `stowed`);
- * - legacy senza marker → migrazione a marker di oggi (grace di 30gg prima del decay);
- * - entry `<!--g-->` non ri-validata → archivio con provenance `legacy-unvalidated`
- *   (la conferma avviene ri-aggiungendo la learning: dedup rigenera il marker);
- * - duplicati per titolo → rimozione (il fatto esiste già); capitans → chiavi duplicate;
- * - budget (default 7500 tok, file `startup-memory-budget`) → sopra soglia archivia i
- *   non-pinned più vecchi (mai pinned); mai delete di unici: tutto finisce nell'archivio.
+ * - aging with marker ≥30 days → refresh (date=today, lite: confirmed by default);
+ * - perishable with marker ≥7 days → archive in memory-archive.md (provenance `stowed`);
+ * - legacy without marker → migration to today's marker (grace of 30 days before decay);
+ * - `<!--g-->` entry not re-validated → archive with provenance `legacy-unvalidated`
+ *   (confirmation happens by re-adding the learning: dedup regenerates the marker);
+ * - duplicates by title → removal (the fact already exists); captains → duplicate keys;
+ * - budget (default 7500 tok, `startup-memory-budget` file) → over the threshold archive the
+ *   oldest non-pinned entries (never pinned); never delete uniques: everything goes to the archive.
  *
- * `dryRun: true` → solo report, zero scritture.
+ * `dryRun: true` → report only, zero writes.
  */
 export function stowPass(stateHome: string, opts?: StowOptions): StowReport {
   const dryRun = opts?.dryRun === true;
-  // dryRun = zero scritture: niente ensureFiles (evita create file/header-pointer)
+  // dryRun = zero writes: no ensureFiles (avoids file/header-pointer creation)
   if (!dryRun) ensureFiles(stateHome);
   const today = new Date().toISOString().slice(0, 10);
 
@@ -561,14 +561,14 @@ export function stowPass(stateHome: string, opts?: StowOptions): StowReport {
       continue;
     }
     if (!marker) {
-      // migrazione one-time: entry legacy assume confermata → marker di oggi
-      // (così il decay scatta solo dopo 30gg, mai trattamento da "rotta")
+      // one-time migration: legacy entry assumed confirmed → today's marker
+      // (so decay only kicks in after 30 days, never treated as "broken")
       ops.push({ idx: i, kind: "refresh", reason: "migration" });
       refreshed++;
       continue;
     }
     if (marker.tier === "grace") {
-      // non ri-validata (nessun re-add con dedup) → legacy-unvalidated
+      // not re-validated (no re-add with dedup) → legacy-unvalidated
       ops.push({ idx: i, kind: "archive", reason: "grace-unvalidated", provenance: "legacy-unvalidated" });
       archived++;
       continue;
@@ -580,7 +580,7 @@ export function stowPass(stateHome: string, opts?: StowOptions): StowReport {
       continue;
     }
     if (marker.tier === "aging" && days >= AGING_STALE_DAYS) {
-      // lite: di default confermata → refresh (data=oggi); mai delete di unici
+      // lite: confirmed by default → refresh (date=today); never delete uniques
       ops.push({ idx: i, kind: "refresh", reason: "stale-aging-refresh" });
       refreshed++;
       continue;
@@ -588,7 +588,7 @@ export function stowPass(stateHome: string, opts?: StowOptions): StowReport {
     ops.push({ idx: i, kind: "keep", reason: "fresh" });
   }
 
-  // Applica le op (dalla fine per non spostare gli indici) → learnFinal
+  // Apply the ops (from the end so indexes don't shift) → learnFinal
   let learnFinal = [...learnLines];
   for (let i = secs.length - 1; i >= 0; i--) {
     const op = ops.find((o) => o.idx === i);
@@ -648,7 +648,7 @@ export function stowPass(stateHome: string, opts?: StowOptions): StowReport {
   let usedTokens = tokenSum();
 
   if (usedTokens > limitTokens) {
-    // archivia i non-pinned più vecchi (per data marker, dal più vecchio)
+    // archive the oldest non-pinned entries (by marker date, oldest first)
     const s2 = parseLearningSections(learnFinal).sections;
     const candidates = s2
       .map((s, idx) => ({ s, idx }))
@@ -671,7 +671,7 @@ export function stowPass(stateHome: string, opts?: StowOptions): StowReport {
       usedTokens = tokenSum();
     }
   }
-  // il conteggio `archived` include anche l'overflow
+  // the `archived` count includes the overflow too
   archived += overflowN;
 
   // ------------------------------------------------------------- write ---
@@ -723,8 +723,8 @@ function parseLearningSections(lines: string[]): { sections: LearningSection[] }
 }
 
 /**
- * Digest compatto degli ultimi `lastN` learnings (titolo + data + primo Fatto troncato).
- * "" se non ci sono entry o il file non è leggibile.
+ * Compact digest of the last `lastN` learnings (title + date + first truncated Fact).
+ * "" if there are no entries or the file is not readable.
  */
 export function learningsDigest(stateHome: string, lastN = 5): string {
   try {
@@ -734,20 +734,20 @@ export function learningsDigest(stateHome: string, lastN = 5): string {
     const recent = sections.slice(-Math.max(1, lastN));
     if (recent.length === 0) return "";
     const parts = recent.map((s) => {
-      const factLine = s.body.find((b) => /^Fatto:/i.test(b.trim())) ?? "";
-      const factText = factLine.trim().replace(/^Fatto:/i, "").trim();
+      const factLine = s.body.find((b) => /^Fact:/i.test(b.trim())) ?? "";
+      const factText = factLine.trim().replace(/^Fact:/i, "").trim();
       const trunc = factText.length > 140 ? `${factText.slice(0, 140)}…` : factText;
       return `- [${s.date}] ${s.title}${trunc ? ` — ${trunc}` : ""}`;
     });
-    return `ultimi ${recent.length} learnings:\n${parts.join("\n")}`;
+    return `last ${recent.length} learnings:\n${parts.join("\n")}`;
   } catch {
     return "";
   }
 }
 
 /**
- * Numero di prefs (righe "chiave: valore") in captain.md + captain-shared.md.
- * Usato per il conteggio nel log di avvio del capitano.
+ * Number of prefs ("key: value" lines) in captain.md + captain-shared.md.
+ * Used for the count in the captain's startup log.
  */
 export function countPrefs(stateHome: string): number {
   let n = 0;
@@ -765,7 +765,7 @@ export function countPrefs(stateHome: string): number {
 }
 
 /**
- * Numero di sezioni datate in learnings.md. 0 se assente/illeggibile.
+ * Number of dated sections in learnings.md. 0 if absent/unreadable.
  */
 export function countLearnings(stateHome: string): number {
   try {
