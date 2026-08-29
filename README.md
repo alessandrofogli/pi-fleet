@@ -185,6 +185,8 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 | `fleet_posture` | Get/set the delivery posture of a project (`get`/`set` + `project`; `posture` only for `set`) |
 | `fleet_outcomes` | Query/audit del registro `branch-outcomes.jsonl` (`limit`/`project`/`verdict`/`raw`) |
 | `fleet_bootstrap` | Verify tools, clean stale state, print a fleet digest (optional `verbose`) |
+| `fleet_learn` | Record an operational learning in `learnings.md` (`title`, `fact`, `implication?`) |
+| `fleet_captain_pref` | Get/set a captain preference (`action`, `key`, `value?` per set, `shared?`) |
 
 #### Task scout (solo-indagine)
 
@@ -198,6 +200,37 @@ fleet_launch(
   kind: "scout"
 )
 ```
+
+
+### Preferenze capitano e learnings persistenti
+
+Preferenze del capitano e fatti operativi vivono in `~/.pi/fleet/` (runtime-globale, **mai in git**) e
+sono disponibili a ogni `session_start` del capitano (il log di avvio riporta `captain prefs: <n> chiavi, <m> learnings`).
+
+| Tool | Cosa fa |
+|---|---|
+| `fleet_captain_pref` | `action: "get" \| "set"`, `key`, `value` (solo set), `shared` (default `false` → `captain.md`; `true` → `captain-shared.md`). Get → valore o `null`; set → conferma con la riga scritta. |
+| `fleet_learn` | `title`, `fact`, `implication?`. Appende una sezione datata a `learnings.md`; dedup per titolo nelle ultime 24h (sostituisce la sezione invece di duplicare). |
+
+**Formato dei file** (righe `chiave: valore`, commenti `#`, sezioni `##` libere):
+
+- `captain.md` — preferenze locali a questa macchina, es.:
+  ```
+  # Preferenze capitano
+  default_timeout_min: 360
+  prefer_report_markdown: true
+  ```
+- `captain-shared.md` — idem, ma condivisibile (per il futuro secondmate).
+- `learnings.md` — entry datate:
+  ```
+  ## 2026-08-29 — titolo breve
+  Fatto: ... (evidence-backed: da quale task/osservazione).
+  Implicazione: ...
+  ```
+
+I tre file vengono creati con header se assenti (`ensureFiles` alla `session_start`); gli aggiornamenti
+sono curati (niente append infinito) e scritti atomicamente (tmp+rename).
+
 
 ### Task states
 
