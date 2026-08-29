@@ -363,10 +363,18 @@ MISS=0
 while :; do
   if [[ -f "$DONE_PATH" ]]; then
     RESULT="$(cat "$DONE_PATH")"
-    STATUS="$(printf '%s' "$RESULT" | jq -r '.status // "failed"')"
-    SUMMARY="$(printf '%s' "$RESULT" | jq -r '.summary // ""')"
-    FILES="$(printf '%s' "$RESULT" | jq -c '.changedFiles // []')"
-    REPORTPATH="$(printf '%s' "$RESULT" | jq -r '.reportPath // ""')"
+    # Il done.json può arrivare con summary multi-riga con newline LETTERALI
+    # (non-escaped), quindi JSON non valido: parse fallback best-effort → done
+    # con summary raw, così lo stato non resta mai bloccato su 'running'.
+    if ! printf '%s' "$RESULT" | jq -e . >/dev/null 2>&1; then
+      log "done.json non-JSON valido (probabili newline letterali nella summary): fallback best-effort"
+      STATUS="done"; SUMMARY="$RESULT"; FILES="[]"; REPORTPATH=""
+    else
+      STATUS="$(printf '%s' "$RESULT" | jq -r '.status // "failed"')"
+      SUMMARY="$(printf '%s' "$RESULT" | jq -r '.summary // ""')"
+      FILES="$(printf '%s' "$RESULT" | jq -c '.changedFiles // []')"
+      REPORTPATH="$(printf '%s' "$RESULT" | jq -r '.reportPath // ""')"
+    fi
     log "completato: $STATUS"
     printf '
 === RISULTATO TASK %s ===
