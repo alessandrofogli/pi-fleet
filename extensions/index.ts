@@ -1,17 +1,17 @@
 /**
- * pi-fleet · extension Pi (M2)
+ * pi-fleet · Pi extension (M2)
  *
- * Avvolge il launcher CLI (bin/herdr-launch.sh) in un'estensione Pi:
- *  - fleet_launch  : spawna un task come PANE HERDR AFFIANCATO (split, non tab)
- *  - fleet_status  : lista task e stati
- *  - fleet_peek    : legge l'output del pane del task
- *  - fleet_steer   : scrive nella prompt del figlio (es. risposta a needs_input)
- *  - fleet_abort   : chiude pane/tab + rilascia worktree + marca aborted
- *  - fleet_attach  : porta il focus herdr sul pane del task
- *  - fleet_learn   : registra un learning operativo datato in learnings.md (dedup 24h)
- *  - fleet_captain_pref : get/set preferenze capitano in captain.md / captain-shared.md
- *  - watcher in-process: risveglia la chat (sendMessage triggerTurn) quando un
- *    task entra in failed/needs_input (i done sono silenziosi, come da decisioni F0)
+ * Wraps the CLI launcher (bin/herdr-launch.sh) in a Pi extension:
+ *  - fleet_launch  : spawns a task as a SIDE-BY-SIDE HERDR PANE (split, not tab)
+ *  - fleet_status  : lists tasks and states
+ *  - fleet_peek    : reads the task pane output
+ *  - fleet_steer   : writes into the child's prompt (e.g. answer to needs_input)
+ *  - fleet_abort   : closes pane/tab + releases worktree + marks aborted
+ *  - fleet_attach  : moves the herdr focus onto the task pane
+ *  - fleet_learn   : records a dated operational learning in learnings.md (24h dedup)
+ *  - fleet_captain_pref : get/set captain preferences in captain.md / captain-shared.md
+ *  - in-process watcher: wakes the chat (sendMessage triggerTurn) when a
+ *    task enters failed/needs_input (done tasks are silent, per F0 decisions)
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -25,7 +25,7 @@ import { mountFleetWatchArm } from "./fleet-watch-arm.js";
 import type { GroupRecord, GroupTaskInfo } from "./fleet-group.js";
 import type { InboxMsg } from "./fleet-inbox.js";
 import type { CheckedTool, GroupSummaryLike } from "./fleet-bootstrap.js";
-// L3.5 barrier — helpers opzionali caricati lazy per fail soft
+// L3.5 barrier — optional helpers lazy-loaded for fail soft
 let _fleetGroup: typeof import("./fleet-group.js") | null = null;
 async function getFleetGroup(): Promise<typeof import("./fleet-group.js") | null> {
   if (_fleetGroup) return _fleetGroup;
@@ -34,7 +34,7 @@ async function getFleetGroup(): Promise<typeof import("./fleet-group.js") | null
 function getFleetGroupSync(): typeof import("./fleet-group.js") | null {
   return _fleetGroup;
 }
-// T-004 branch outcomes — helpers opzionali caricati lazy, stesso pattern di getFleetGroup
+// T-004 branch outcomes — optional helpers lazy-loaded, same pattern as getFleetGroup
 let _fleetOutcomes: typeof import("./fleet-outcomes.js") | null = null;
 async function getFleetOutcomes(): Promise<typeof import("./fleet-outcomes.js") | null> {
   if (_fleetOutcomes) return _fleetOutcomes;
@@ -43,13 +43,13 @@ async function getFleetOutcomes(): Promise<typeof import("./fleet-outcomes.js") 
 function getFleetOutcomesSync(): typeof import("./fleet-outcomes.js") | null {
   return _fleetOutcomes;
 }
-// T-003 — delivery posture: modulo opzionale caricato lazy per fail soft
+// T-003 — delivery posture: optional module lazy-loaded for fail soft
 let _fleetPosture: typeof import("./fleet-posture.js") | null = null;
 async function getFleetPosture(): Promise<typeof import("./fleet-posture.js") | null> {
   if (_fleetPosture) return _fleetPosture;
   try { _fleetPosture = await import("./fleet-posture.js"); return _fleetPosture; } catch { return null; }
 }
-// T-002 (5b.2) inbox durabile — stesso pattern lazy di fleet-group (fail soft)
+// T-002 (5b.2) durable inbox — same lazy pattern as fleet-group (fail soft)
 let _fleetInbox: typeof import("./fleet-inbox.js") | null = null;
 async function getFleetInbox(): Promise<typeof import("./fleet-inbox.js") | null> {
   if (_fleetInbox) return _fleetInbox;
@@ -58,7 +58,7 @@ async function getFleetInbox(): Promise<typeof import("./fleet-inbox.js") | null
 function getFleetInboxSync(): typeof import("./fleet-inbox.js") | null {
   return _fleetInbox;
 }
-// T-006 bootstrap — stesso pattern lazy/fail soft di getFleetGroup
+// T-006 bootstrap — same lazy/fail soft pattern as getFleetGroup
 let _fleetBootstrap: typeof import("./fleet-bootstrap.js") | null = null;
 async function getFleetBootstrap(): Promise<typeof import("./fleet-bootstrap.js") | null> {
   if (_fleetBootstrap) return _fleetBootstrap;
@@ -67,7 +67,7 @@ async function getFleetBootstrap(): Promise<typeof import("./fleet-bootstrap.js"
 function getFleetBootstrapSync(): typeof import("./fleet-bootstrap.js") | null {
   return _fleetBootstrap;
 }
-// 5b.5 learnings/prefs — lazy import come fleet-group (fail soft)
+// 5b.5 learnings/prefs — lazy import like fleet-group (fail soft)
 let _fleetLearn: typeof import("./fleet-learn.js") | null = null;
 async function getFleetLearn(): Promise<typeof import("./fleet-learn.js") | null> {
   if (_fleetLearn) return _fleetLearn;
@@ -84,10 +84,10 @@ const STATE_HOME = process.env.FLEET_STATE_HOME ?? join(homedir(), ".pi", "fleet
 const TASKS_DIR = join(STATE_HOME, "tasks");
 const WAKE_CHANNEL = "pi-fleet.wake.v1";
 const POLL_MS = 3000;
-// T-002 (5b.2): inbox re-ring — intervallo tra replay e max prima dell'escalation
+// T-002 (5b.2): inbox re-ring — interval between replays and max before escalation
 const RING_INTERVAL_MS = 60_000;
 const RING_MAX_REPLAYS = 5;
-// L3.5 batch window: tutti i fleet_launch dello stesso turno LLM (<3s) condividono lo stesso groupId
+// L3.5 batch window: all fleet_launch calls in the same LLM turn (<3s) share the same groupId
 let lastGroupId: string | null = null;
 let lastGroupTime = 0;
 let lastGroupSize = 0;
@@ -122,7 +122,7 @@ interface TaskStateFile {
   reportPath?: string;
   deliveryPosture?: string;
   groupFailPolicy?: "waitAll" | "immediate";
-  // T-011 gate meccanico: esito della verifica anti-frode del launcher
+  // T-011 mechanical gate: outcome of the launcher's anti-fraud verification
   gate?: { passed: boolean; rounds?: number; reportPath?: string };
   prUrl?: string;
 }
@@ -142,9 +142,9 @@ function parseTaskFile(name: string): TaskStateFile | null {
     if (typeof data.id !== "string" || typeof data.state !== "string") return null;
     return data;
   } catch {
-    // MAI cancellare: se il parse fallisce il file potrebbe essere a metà
-    // scrittura (il launcher scrive in modo atomico, ma il primo giro M1 no).
-    // Lo rinomina .bad così è ispezionabile e un poll successivo può rileggere.
+    // NEVER delete: if parsing fails, the file may be mid-write
+    // (the launcher writes atomically, but the first M1 pass did not).
+    // Rename it to .bad so it stays inspectable and a later poll can re-read.
     try { renameSync(join(STATE_HOME, name), join(STATE_HOME, name + ".bad")); } catch { /* ignore */ }
     return null;
   }
@@ -168,7 +168,7 @@ function writeTask(task: TaskStateFile): void {
   writeFileSync(join(STATE_HOME, `${task.id}.json`), JSON.stringify(task, null, 2) + "\n");
 }
 
-/** Slug leggibile da titolo: ascii, minuscole, max 30 char (es. 'Analisi modelli' → 'analisi-modelli'). */
+/** Slug readable from the title: ascii, lowercase, max 30 chars (e.g. 'Model analysis' → 'model-analysis'). */
 function slugify(s: string, max = 30): string {
   return s
     .toLowerCase()
@@ -274,14 +274,14 @@ function spawnLauncher(taskId: string, title: string, briefPath: string, params:
   if (params.model) args.push("--model", params.model);
   if (params.timeoutMin) args.push("--timeout-min", String(params.timeoutMin));
   if (params.session) args.push("--session", params.session);
-  // L3.5: passa gruppo al launcher bash
+  // L3.5: pass the group to the bash launcher
   const gid = (params as FleetLaunchParams & { effectiveGroupId?: string }).effectiveGroupId ?? params.groupId;
   if (gid) args.push("--group-id", gid);
   if (params.groupLabel) args.push("--group-label", params.groupLabel);
   if (params.groupMode) args.push("--group-mode", params.groupMode);
-  // scout: solo report (report.md) — nessun commit/PR lato figlio
+  // scout: report only (report.md) — no commit/PR on the child side
   if (params.kind === "scout") args.push("--kind", "scout");
-  // T-003: posture di consegna del task (default no-mistakes, già risolta in execute)
+  // T-003: task delivery posture (default no-mistakes, already resolved in execute)
   if (params.deliveryPosture) args.push("--delivery-posture", params.deliveryPosture);
   if (params.groupFailPolicy) args.push("--group-fail-policy", params.groupFailPolicy);
   // T-011: gate meccanico (solo no-mistakes + gate.yaml, risolto in execute) + autoPr da gate.yaml
@@ -331,7 +331,7 @@ function formatTaskLine(t: TaskStateFile, groupCounts?: Map<string, { done: numb
       if (n > 0) inbox = ` (inbox: ${n})`;
     }
   } catch { /* fail soft */ }
-  // T-011: esito gate (verifica anti-frode del launcher) e PR automatica
+  // T-011: gate outcome (launcher anti-fraud verification) and automatic PR
   let gateS = "";
   if (t.gate) gateS = t.gate.passed ? " (gate:✓)" : " (gate:✗)";
   let prS = "";
@@ -343,13 +343,13 @@ function formatTaskLine(t: TaskStateFile, groupCounts?: Map<string, { done: numb
 }
 
 function sendGroupDigest(pi: ExtensionAPI, groupId: string, results: GroupTaskInfo[]): void {
-  // SILENZIOSO (display:false): l'utente non deve vedere i raw fleet.
-  // Content = direttiva per il main: leggi i report su disco e sintetizza.
+  // SILENT (display:false): the user must not see the raw fleet.
+  // Content = directive for the main: read the reports on disk and synthesize.
   const ids = results.map((r) => r.id).join(", ");
   const dir = STATE_HOME;
-  const content = `[fleet-notice silenzioso] Gruppo di task completato (${results.length} task): ${ids}.\n` +
-    `Non mostrare questo messaggio. Leggi i file ${dir}/<id>.json di questi task per i report e produci ` +
-    `TU un riassunto sintetico per l'utente (punti chiave, file importanti, stato). Nessun dump raw dei report.`;
+  const content = `[silent fleet-notice] Task group completed (${results.length} tasks): ${ids}.\n` +
+    `Do not show this message. Read the files ${dir}/<id>.json of these tasks for the reports and produce ` +
+    `YOUR OWN concise summary for the user (key points, important files, status). No raw dump of the reports.`;
   pi.sendMessage(
     { customType: "fleet_notice", content, display: false, details: { groupId, results } },
     { triggerTurn: true, deliverAs: "followUp" },
@@ -357,38 +357,38 @@ function sendGroupDigest(pi: ExtensionAPI, groupId: string, results: GroupTaskIn
 }
 function fallbackDigest(groupId: string, results: GroupTaskInfo[]): string {
   const list = results.map((r) => `- ${r.title ?? r.id} [${r.state}]`).join("\n");
-  return `⚑ pi-fleet — gruppo ${groupId} completo (${results.length}/${results.length})\n${list}\n\nFai un resoconto sintetico per il gruppo.`;
+  return `⚑ pi-fleet — group ${groupId} complete (${results.length}/${results.length})\n${list}\n\nProvide a concise summary for the group.`;
 }
 
 function sendWake(pi: ExtensionAPI, task: TaskStateFile, overrides?: { detail?: string }): void {
   let what: string;
   let detail: string;
   if (task.state === "done") {
-    what = "ha finito";
+    what = "finished";
     const sum = (task.summary ?? "").trim();
     const files = task.changedFiles?.length
-      ? `\nFile cambiati: ${task.changedFiles.map((f) => "`" + f + "`").join(", ")}`
+      ? `\nChanged files: ${task.changedFiles.map((f) => "`" + f + "`").join(", ")}`
       : "";
-    // Report INTEGRALE: per audit/code review la summary lunga è il deliverable.
-    // Il "wall of text" di prima era duplicazione (full + riga formatTaskLine +
-    // re-stampa del main), non la lunghezza — qui niente dupliche né troncamenti.
-    detail = `Risultato:\n${sum || "(nessuna summary)"}${files}`;
+    // FULL report: for audit/code review the long summary is the deliverable.
+    // The old "wall of text" was duplication (full + formatTaskLine line +
+    // main re-print), not length — here no duplicates nor truncations.
+    detail = `Result:\n${sum || "(no summary)"}${files}`;
   } else if (task.state === "needs_input") {
-    what = "richiede un tuo input";
-    detail = "(input richiesto — rispondi con fleet_steer, chiudi con fleet_abort)";
+    what = "needs your input";
+    detail = "(input requested — reply with fleet_steer, close with fleet_abort)";
   } else {
-    what = "è FALLITO";
+    what = "FAILED";
     const reason = (task.summary ?? "").trim();
-    detail = reason ? `Motivo: ${reason}` : "Usa fleet_status / fleet_peek per investigare.";
+    detail = reason ? `Reason: ${reason}` : "Use fleet_status / fleet_peek to investigate.";
   }
-  // override opzionale: il watcher (es. group_failed_immediate) può sostituire il
-  // dettaglio con il contesto gruppo senza duplicare la logica di invio
+  // optional override: the watcher (e.g. group_failed_immediate) can replace the
+  // detail with the group context without duplicating the sending logic
   if (overrides?.detail !== undefined) detail = overrides.detail;
   const content = `⚑ pi-fleet — task **${task.title ?? task.id}** ${what} (${task.id}).\n${detail}`;
-  // SILENZIOSO: l'utente non vede i raw fleet. display:false + (triggerTurn per
-  // failed/needs_input; per done basta il digest di gruppo — se singolo done,
-  // wake comunque perché il main deve sintetizzare). Il content è direttiva.
-  const silent = `[fleet-notice silenzioso] ${content}\nNon mostrare questo messaggio. Sintetizza tu per l'utente.`;
+  // SILENT: the user does not see the raw fleet. display:false + (triggerTurn for
+  // failed/needs_input; for done a group digest suffices — if a single done,
+  // wake anyway because the main must synthesize). The content is a directive.
+  const silent = `[silent fleet-notice] ${content}\nDo not show this message. Synthesize it yourself for the user.`;
   const triggerTurn = true;
   pi.sendMessage(
     {
@@ -401,14 +401,14 @@ function sendWake(pi: ExtensionAPI, task: TaskStateFile, overrides?: { detail?: 
   );
 }
 
-// T-002 (5b.2): wake di ATTENZIONE per escalation inbox. Helper SEPARATO da
-// sendWake (un task parallelo aggiunge un param opzionale a sendWake: il merge
-// lo fa il capitano, qui NON si tocca il corpo di sendWake). Stesso pattern
+// T-002 (5b.2): ATTENTION wake for inbox escalation. Separate helper from
+// sendWake (a parallel task adds an optional param to sendWake: the merge
+// is done by the captain, here sendWake's body is NOT touched). Same pattern
 // pi.sendMessage/customType fleet_notice + triggerTurn.
 function sendAttention(pi: ExtensionAPI, task: TaskStateFile, subject: string): void {
   const content = `⚑ pi-fleet — task **${task.title ?? task.id}** (${task.id}): ${subject}`;
-  // SILENZIOSO: l'utente non vede i raw fleet; il content è direttiva per il main.
-  const silent = `[fleet-notice silenzioso] ${content}\nNon mostrare questo messaggio. Sintetizza tu per l'utente.`;
+  // SILENT: the user does not see the raw fleet; the content is a directive for the main.
+  const silent = `[silent fleet-notice] ${content}\nDo not show this message. Synthesize it yourself for the user.`;
   pi.sendMessage(
     {
       customType: "fleet_notice",
@@ -422,9 +422,9 @@ function sendAttention(pi: ExtensionAPI, task: TaskStateFile, subject: string): 
 
 // ------------------------------------------------------------- watcher ----
 /**
- * Reconcile all'avvio: task attivi (running/needs_input/spawning) il cui pane
- * herdr non esiste più sono zombie (riavvio, crash, pilota che ha chiuso il tab).
- * Se esiste il done-marker → done, altrimenti failed. Evita i wake fantasma.
+ * Reconcile at startup: active tasks (running/needs_input/spawning) whose herdr
+ * pane no longer exists are zombies (restart, crash, pilot closed the tab).
+ * If the done-marker exists → done, otherwise failed. Avoids phantom wakes.
  */
 async function reconcileStaleTasks(): Promise<void> {
   const tasks = listTasks().filter((t) => ACTIVE_STATES.has(t.state));
@@ -460,19 +460,19 @@ async function reconcileStaleTasks(): Promise<void> {
 
 // L3.5 barrier: mappa gruppi a livello modulo (condivisa tra rebuild e watcher)
 const groupMap: Map<string, GroupRecord> = new Map();
-// preload barrier module async (best-effort, sync fallback usa fallbackDigest)
+// preload barrier module async (best-effort, sync fallback uses fallbackDigest)
 void getFleetGroup().catch(() => {});
-// T-004: preload del modulo outcomes (async, best-effort) così il sync getter è pronto nel watcher
+// T-004: preload the outcomes module (async, best-effort) so the sync getter is ready in the watcher
 void getFleetOutcomes().catch(() => {});
 // T-002 (5b.2): inbox re-ring attivi per task (guard anti-duplicati: taskId → stop())
 const reRingInFlight = new Map<string, () => void>();
 void getFleetInbox().catch(() => {});
 
 function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => void {
-  // Seed: gli stati GIÀ presenti all'avvio non devono fare wake (niente
-  // notifiche fantasma per task finiti/finiti prima che il watcher parta).
+  // Seed: states ALREADY present at startup must not wake (no
+  // phantom notifications for tasks finished before the watcher started).
   for (const task of listTasks()) watch.set(task.id, task.state);
-  // L3.5: carica gruppi da disco se modulo disponibile (sync path)
+  // L3.5: load groups from disk if the module is available (sync path)
   try {
     const mod = getFleetGroupSync();
     if (mod) {
@@ -486,11 +486,11 @@ function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => vo
       const prev = watch.get(task.id);
       const isTerminal = task.state === "failed" || task.state === "needs_input" || task.state === "done";
       if (prev !== task.state && isTerminal) {
-        // T-004: audit trail branch-outcomes — PRIMA della logica group/wake.
-        // Best-effort: il registro non deve mai rompere il wake.
+        // T-004: audit trail branch-outcomes — BEFORE the group/wake logic.
+        // Best-effort: the registry must never break the wake.
         try { getFleetOutcomesSync()?.appendOutcome(STATE_HOME, task); } catch { /* best-effort */ }
-        // L3.5 barrier logic — groupSize su disco è un placeholder (1), si deriva
-        // dal CONTEGGIO REALE dei task che condividono lo stesso groupId.
+        // L3.5 barrier logic — groupSize on disk is a placeholder (1), it is derived
+        // from the REAL COUNT of tasks sharing the same groupId.
         const mod = getFleetGroupSync();
         let realGroupSize = task.groupSize ?? 1;
         if (task.groupId) {
@@ -501,11 +501,11 @@ function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => vo
         if (realGroupSize < 1) realGroupSize = 1;
         const hasGroup = !!(task.groupId && realGroupSize > 1 && (task.groupMode ?? "barrier") === "barrier");
         if (mod && hasGroup) {
-          // allinea groupSize affinché recordTaskDone usi expected reale (non il placeholder)
+          // align groupSize so recordTaskDone uses the real expected (not the placeholder)
           task.groupSize = realGroupSize;
           try {
             if (task.state === "needs_input") {
-              // needs_input rompe barrier: wake immediato + registra per consistenza
+              // needs_input breaks the barrier: immediate wake + record for consistency
               try { mod.recordTaskDone(STATE_HOME, groupMap, task); } catch { /* ignore */ }
               watch.set(task.id, task.state);
               sendWake(pi, task);
@@ -521,15 +521,15 @@ function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => vo
                 watch.set(task.id, task.state);
                 sendWake(pi, task);
               } else if (ev.kind === "group_failed_immediate") {
-                // policy immediate: failed in gruppo → wake SUBITO con contesto gruppo
+                // immediate policy: failed in group → wake NOW with group context
                 watch.set(task.id, task.state);
                 const done = ev.group.results.size;
                 const pending = ev.group.pending.size;
                 const lbl = ev.group.label ? ` "${ev.group.label}"` : "";
                 const reason = (task.summary ?? "").trim();
-                const mot = reason ? `Motivo: ${reason}` : "Usa fleet_status / fleet_peek per investigare.";
+                const mot = reason ? `Reason: ${reason}` : "Use fleet_status / fleet_peek to investigate.";
                 sendWake(pi, task, {
-                  detail: `Gruppo ${shortGroupId(ev.group.groupId)}${lbl} (policy immediate): ${done} done, ${pending} pending.\n${mot}`,
+                  detail: `Group ${shortGroupId(ev.group.groupId)}${lbl} (immediate policy): ${done} done, ${pending} pending.\n${mot}`,
                 });
               }
             }
@@ -538,7 +538,7 @@ function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => vo
             sendWake(pi, task);
           }
         } else {
-          // singolo o streaming o modulo non disponibile → wake immediato
+          // single or streaming or module unavailable → immediate wake
           watch.set(task.id, task.state);
           sendWake(pi, task);
         }
@@ -546,9 +546,9 @@ function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => vo
         watch.set(task.id, task.state);
       }
     }
-    // T-002 (5b.2): inbox re-ring — per i task attivi (running/needs_input) con
-    // messaggi pendenti non ackati avvia il reRing (un timer per task, guard
-    // reRingInFlight per non duplicarlo). Escalation → wake del capitano.
+    // T-002 (5b.2): inbox re-ring — for active tasks (running/needs_input) with
+    // pending un-acked messages start the reRing (one timer per task, guarded by
+    // reRingInFlight to avoid duplicates). Escalation → wake the captain.
     try {
       const mod = getFleetInboxSync();
       if (mod) {
@@ -576,14 +576,14 @@ function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => vo
                 return mod.deliver(STATE_HOME, task.id, msg.seq, send);
               },
               onEscalation: (tid, msg) => {
-                sendAttention(pi, task, `il task ${tid} non ha ackato il messaggio #${msg.seq} dopo ${msg.replays} tentativi`);
+                sendAttention(pi, task, `task ${tid} did not ack message #${msg.seq} after ${msg.replays} attempts`);
               },
               onIdle: (tid) => { reRingInFlight.delete(tid); },
             });
             reRingInFlight.set(task.id, stop);
           }
         }
-        // ferma i reRing dei task non più attivi (done/failed/aborted) o spariti
+        // stop the reRings of tasks no longer active (done/failed/aborted) or gone
         for (const [id, stop] of reRingInFlight) {
           const t = readTask(id);
           if (!t || (t.state !== "running" && t.state !== "needs_input")) {
@@ -611,11 +611,11 @@ interface BackgroundWorkProviderShape {
 }
 
 // ---------------------------------------------------------------- tools ----
-// I "subagent" non sono processi figli: sono sessioni pi INDIPENDENTI nel pane
-// herdr, coordinate via i file condivisi in ~/.pi/fleet. Tutte caricano questa
-// estensione → il watcher/invio dei fleet_notice DEVE scattare SOLO nel capitano
-// (cwd = HOME, policy AGENTS.md). Nei figli l'estensione resta muta: niente
-// watcher, niente reconcile, solo i tool di consultazione.
+// The "subagents" are not child processes: they are INDEPENDENT pi sessions in the
+// herdr pane, coordinated via the shared files in ~/.pi/fleet. They all load this
+// extension → the watcher/fleet_notice dispatch MUST only fire in the captain
+// (cwd = HOME, AGENTS.md policy). In children the extension stays mute: no
+// watcher, no reconcile, only the consultation tools.
 const IS_CAPTAIN: boolean =
   process.env.PI_FLEET_CHILD === "1"
     ? false
@@ -630,31 +630,31 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     name: "fleet_launch",
     label: "Fleet Launch",
     description:
-      "Spawna un sub-agent VISIBILE: lo esegue in un workspace herdr 'fleet' dedicato (tab --no-focus) con pi dentro (stesso modello della sessione main), in una worktree treehouse isolata, gli consegna il brief e libera la chat. Il figlio NON ruba il focus e NON occupa spazio nel tab del capitano: è visibile SOLO nella sidebar agents di herdr a sinistra (fino a che non lo apri). A fine task il report arriva nella chat (successo senza interruzione; failed/needs_input risvegliano il main agent nel turno).",
+      "Spawns a VISIBLE sub-agent: runs it in a dedicated herdr 'fleet' workspace (tab --no-focus) with pi inside (same model as the main session), in an isolated treehouse worktree, hands it the brief and frees the chat. The child does NOT steal focus and takes no space in the captain's tab: it is visible ONLY in herdr's agents sidebar on the left (until you open it). At task end the report arrives in the chat (success without interruption; failed/needs_input wake the main agent in the turn).",
     promptSnippet: "Spawn a background herdr sub-agent (agents-sidebar only) for a delegation task",
     promptGuidelines: [
       "AUTOMATICALLY call fleet_launch for ANY non-trivial request about a project: reading/analyzing, editing, implementing, fixing, testing, refactoring. Do NOT wait for the user to type fleet_launch and do NOT ask for confirmation — delegation is the default. Handle inline ONLY questions answerable from context, fleet management, and trivial one-liners.",
       "project is REQUIRED (absolute path, ~/path, or short name if FLEET_PROJECTS_DIR is set): derive it from the user's message or the last task's project; ask one short question only if truly ambiguous. Never launch without project. Keep worktree enabled.",
       "For multiple independent requests, launch them in PARALLEL (max 5 per turn) instead of sequentially.",
       "CRITICAL: After fleet_launch returns, STOP IMMEDIATELY and END YOUR TURN. Do NOT call fleet_status, fleet_peek, fleet_watch_arm_pi, or any other fleet tool to check progress. The task runs detached in background - you will be WOKEN automatically via fleet_notice when it finishes (done=silent followUp, failed/needs_input=triggerTurn). Polling wastes context and blocks the session. Your turn is OVER after launch.",
-      "When you receive a fleet_notice group complete (e.g. \"⚑ pi-fleet — gruppo ... completo\"), IMMEDIATELY produce a concise synthesis per gruppo: key findings, important files, status per task. Do NOT just echo the raw fleet list — synthesize into a clear summary for the user. This synthesis is the ONLY verbose output the user should see for the group; the raw fleet list is just the trigger.",
+      "When you receive a fleet_notice group complete (e.g. \"⚑ pi-fleet — group ... complete\"), IMMEDIATELY produce a concise synthesis per group: key findings, important files, status per task. Do NOT just echo the raw fleet list — synthesize into a clear summary for the user. This synthesis is the ONLY verbose output the user should see for the group; the raw fleet list is just the trigger.",
     ],
     parameters: Type.Object({
-      title: Type.String({ description: "Breve titolo del task" }),
-      brief: Type.String({ description: "Istruzioni complete del task (markdown)" }),
+      title: Type.String({ description: "Short task title" }),
+      brief: Type.String({ description: "Complete task instructions (markdown)" }),
       project: Type.String({ description: "Project: absolute path (e.g. /home/user/projects/my-app or ~/projects/my-app) or short name if FLEET_PROJECTS_DIR is set. REQUIRED." }),
-      worktree: Type.Optional(Type.Boolean({ description: "Usa una worktree treehouse isolata (default: true)" })),
-      model: Type.Optional(Type.String({ description: "Override modello, es. 'opencode-go/deepseek-v4-flash' (default: modello della sessione parent)" })),
-      timeoutMin: Type.Optional(Type.Number({ description: "Timeout in minuti (default: 360)" })),
+      worktree: Type.Optional(Type.Boolean({ description: "Use an isolated treehouse worktree (default: true)" })),
+      model: Type.Optional(Type.String({ description: "Model override, e.g. 'opencode-go/deepseek-v4-flash' (default: parent session model)" })),
+      timeoutMin: Type.Optional(Type.Number({ description: "Timeout in minutes (default: 360)" })),
       groupId: Type.Optional(Type.String({ description: "Group id for barrier digest (e.g. grp-20260828-a1b2c3). Auto-generated via batch window if omitted." })),
       groupLabel: Type.Optional(Type.String({ description: "Optional label for the group (shown in digest)" })),
       groupMode: Type.Optional(Type.String({ description: "Group mode: barrier (wait all) or streaming (per-task). Default barrier." })),
-      kind: Type.Optional(Type.Union([Type.Literal("ship"), Type.Literal("scout")], { description: "Tipo task: ship (default) o scout (solo report, nessun commit/PR)" })),
-      deliveryPosture: Type.Optional(Type.String({ description: "Delivery posture del task (no-mistakes|direct-PR|local-only|yolo). Default: dal config postures.json o no-mistakes." })),
-      groupFailPolicy: Type.Optional(Type.String({ description: "waitAll (default) | immediate: failed in gruppo sveglia subito il capitano" })),
+      kind: Type.Optional(Type.Union([Type.Literal("ship"), Type.Literal("scout")], { description: "Task kind: ship (default) or scout (report only, no commit/PR)" })),
+      deliveryPosture: Type.Optional(Type.String({ description: "Task delivery posture (no-mistakes|direct-PR|local-only|yolo). Default: from postures.json config or no-mistakes." })),
+      groupFailPolicy: Type.Optional(Type.String({ description: "waitAll (default) | immediate: a failed group task wakes the captain immediately" })),
     }),
-    // L3.5: se lanci N in parallelo nello stesso turno, riusa stesso groupId (auto-batch)
-    // La guideline aiuta il modello a passare groupId esplicito se vuole gruppi separati.
+    // L3.5: if you launch N in parallel in the same turn, reuse the same groupId (auto-batch)
+    // The guideline helps the model pass an explicit groupId if it wants separate groups.
 
     async execute(_toolCallId: string, params: FleetLaunchParams, _signal?: unknown, _onUpdate?: unknown, ctx?: { model?: { id?: string; provider?: string } }) {
       const resolved = resolveProject(params.project);
@@ -671,7 +671,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         };
       }
       const project = resolved.path;
-      // T-003: posture di consegna — param > config postures.json > default no-mistakes
+      // T-003: delivery posture — param > postures.json config > default no-mistakes
       let posture = params.deliveryPosture;
       const postureMod = await getFleetPosture();
       if (!posture) posture = postureMod?.getPosture(project) ?? "no-mistakes";
@@ -680,7 +680,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       const briefPath = join(TASKS_DIR, `${id}.brief.md`);
       writeFileSync(briefPath, params.brief);
 
-      // L3.5 batch window: auto-gruppo per lanci ravvicinati (<3s)
+      // L3.5 batch window: auto-group for closely-spaced launches (<3s)
       let effectiveGroupId: string | undefined = params.groupId;
       if (!effectiveGroupId) {
         if (lastGroupId && Date.now() - lastGroupTime < 3000) {
@@ -722,9 +722,9 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
 
       const launchParams = { ...params, project, effectiveGroupId } as FleetLaunchParams & { effectiveGroupId?: string };
       launchParams.deliveryPosture = posture;
-      // T-011 gate meccanico: attivo SOLO quando posture no-mistakes E il progetto
-      // ha gate.yaml. Retrocompatibilità: posture diverse e progetti senza gate.yaml
-      // non cambiano nulla. autoPr dal gate.yaml (default false — MAI aprire PR senza config).
+      // T-011 mechanical gate: active ONLY when posture no-mistakes AND the project
+      // has gate.yaml. Backward compatibility: other postures and projects without
+      // gate.yaml change nothing. autoPr from gate.yaml (default false — NEVER open a PR without config).
       const gateYamlPath = join(project, "gate.yaml");
       if (posture === "no-mistakes" && existsSync(gateYamlPath)) {
         launchParams.gate = true;
@@ -733,16 +733,16 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
           const raw = readFileSync(gateYamlPath, "utf8");
           const m = raw.match(/^\s*autoPr\s*:\s*(true|false)\s*$/m);
           if (m?.[1] === "true") launchParams.autoPr = true;
-        } catch { /* gate.yaml illeggibile → autoPr false (fail-open sul gate) */ }
+        } catch { /* unreadable gate.yaml → autoPr false (fail-open on the gate) */ }
       }
-      // Eredita il modello ATTIVO della sessione main (ctx.model) componendo
-      // SEMPRE `provider/id` (es. "opencode-go/deepseek-v4-flash"): le env
-      // PI_MODEL/PI_DEFAULT_MODEL sono statiche all'avvio e NON seguono i cambi
-      // a metà sessione (/model, Ctrl+P). MAI il bare id: pi models risolve i
-      // bare id solo se UNICI, e modelli come "deepseek-v4-flash" collidono tra
-      // più provider → pi parte ed esce ~2.6s per ambiguità. L'override esplicito
-      // dell'utente vince; se il provider non è componibile → PI_DEFAULT_MODEL,
-      // altrimenti nessun --model (il launcher ha la sua catena di fallback).
+      // Inherits the ACTIVE model of the main session (ctx.model) composing
+      // ALWAYS `provider/id` (e.g. "opencode-go/deepseek-v4-flash"): the env
+      // vars PI_MODEL/PI_DEFAULT_MODEL are static at startup and do NOT follow
+      // mid-session changes (/model, Ctrl+P). NEVER the bare id: pi models resolves
+      // bare ids only if UNIQUE, and models like "deepseek-v4-flash" collide across
+      // providers → pi starts and exits ~2.6s due to ambiguity. An explicit user
+      // override wins; if the provider is not composable → PI_DEFAULT_MODEL,
+      // otherwise no --model (the launcher has its own fallback chain).
       let effectiveModel = params.model;
       if (!effectiveModel && ctx?.model?.id) {
         const provider = ctx.model.provider || process.env.PI_PROVIDER;
@@ -766,8 +766,8 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         content: [{
           type: "text",
           text: res.ok
-            ? `⚑ Task **${params.title}** lanciato (${id}) su **${project}**. STOP: non chiamare fleet_status/fleet_peek. Il task gira detached in background (tab herdr + worktree). Verrai svegliato automaticamente al completamento. Il tuo turno finisce qui.`
-            : `fleet_launch fallito: ${res.error}`,
+            ? `⚑ Task **${params.title}** launched (${id}) on **${project}**. STOP: do not call fleet_status/fleet_peek. The task runs detached in background (herdr tab + worktree). You will be woken automatically on completion. Your turn ends here.`
+            : `fleet_launch failed: ${res.error}`,
         }],
         details,
       };
@@ -778,15 +778,15 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fleet_status",
     label: "Fleet Status",
-    description: "Lista tutti i task pi-fleet con stato, progetto e pane herdr. Supporta filtro per gruppo e mostra avanzamento grp:xxx done/total.",
+    description: "Lists all pi-fleet tasks with state, project and herdr pane. Supports group filter and shows grp:xxx done/total progress.",
     promptSnippet: "List active pi-fleet tasks and their states",
     parameters: Type.Object({
-      limit: Type.Optional(Type.Number({ description: "Max righe (default: 30)" })),
-      groupId: Type.Optional(Type.String({ description: "Filtra per gruppo (groupId completo o prefisso 8)" })),
+      limit: Type.Optional(Type.Number({ description: "Max rows (default: 30)" })),
+      groupId: Type.Optional(Type.String({ description: "Filter by group (full groupId or 8-char prefix)" })),
     }),
     async execute(_toolCallId, params: { limit?: number; groupId?: string }) {
       let allTasks = listTasks();
-      // filtro per gruppo se richiesto — matcha groupId o fallback id per singoli
+      // group filter if requested — matches groupId or id fallback for singles
       if (params.groupId) {
         const gid = params.groupId;
         allTasks = allTasks.filter((t) => (t.groupId ?? t.id) === gid || (t.groupId ?? "").startsWith(gid) || t.id === gid);
@@ -802,7 +802,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
           groupSummaries = fn(allTasks as unknown as Array<{ id: string; state: string; groupId?: string; groupSize?: number; groupLabel?: string }>);
           groupCounts = new Map(groupSummaries.map((g) => [g.groupId, { done: g.done, total: g.expected }]));
         } else {
-          // fallback: raggruppa per groupId contando terminal
+          // fallback: group by groupId counting terminal states
           const byGroup = new Map<string, TaskStateFile[]>();
           for (const t of allTasks) {
             if (!t.groupId || (t.groupSize ?? 1) <= 1) continue;
@@ -834,7 +834,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       let text: string;
       const hasGroups = tasks.some((t) => t.groupId && (t.groupSize ?? 1) > 1);
       if (hasGroups && !params.groupId) {
-        // output raggruppato per gruppo
+        // output grouped by group
         const byGroup = new Map<string, TaskStateFile[]>();
         const singles: TaskStateFile[] = [];
         for (const t of tasks) {
@@ -848,17 +848,17 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
           const g = groupSummaries.find((x) => x.groupId === gid);
           const label = g?.label ? ` (${g.label})` : "";
           const prog = g ? `${g.done}/${g.expected}` : `${members.length}`;
-          lines.push(`**Gruppo ${shortGroupId(gid)}${label} — ${prog} completi:**`);
+          lines.push(`**Group ${shortGroupId(gid)}${label} — ${prog} complete:**`);
           for (const m of members) lines.push(`  ${formatTaskLine(m, groupCounts)}`);
         }
         if (singles.length) {
-          lines.push(`**Singoli:**`);
+          lines.push(`**Singles:**`);
           for (const s of singles) lines.push(`  ${formatTaskLine(s, groupCounts)}`);
         }
-        text = `**Flotta pi-fleet (${tasks.length})**:\n${lines.join("\n")}\n\nDettagli strutturati in details.`;
+        text = `**pi-fleet fleet (${tasks.length})**:\n${lines.join("\n")}\n\nStructured details in details.`;
       } else {
-        const lines = tasks.length ? tasks.map((t) => formatTaskLine(t, groupCounts)) : ["(nessun task)"];
-        text = `**Flotta pi-fleet (${tasks.length})**:\n${lines.join("\n")}\n\nDettagli strutturati in details.`;
+        const lines = tasks.length ? tasks.map((t) => formatTaskLine(t, groupCounts)) : ["(no tasks)"];
+        text = `**pi-fleet fleet (${tasks.length})**:\n${lines.join("\n")}\n\nStructured details in details.`;
       }
       return {
         content: [{ type: "text", text }],
@@ -871,24 +871,24 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fleet_outcomes",
     label: "Fleet Outcomes",
-    description: "Query/audit del registro branch-outcomes (vedi T-004): ~/.pi/fleet/branch-outcomes.jsonl, append-only, una riga JSON per transizione terminale/needs_input di ogni task. raw=true ritorna il JSONL grezzo, altrimenti un elenco leggibile.",
+    description: "Query/audit of the branch-outcomes registry (see T-004): ~/.pi/fleet/branch-outcomes.jsonl, append-only, one JSON line per terminal/needs_input transition of each task. raw=true returns the raw JSONL, otherwise a readable list.",
     promptSnippet: "Query the branch-outcomes audit trail (append-only JSONL) for terminal/needs_input transitions",
     parameters: Type.Object({
-      limit: Type.Optional(Type.Number({ description: "Max righe (default: 20)" })),
-      project: Type.Optional(Type.String({ description: "Filtra per progetto (match parziale sul percorso)" })),
+      limit: Type.Optional(Type.Number({ description: "Max rows (default: 20)" })),
+      project: Type.Optional(Type.String({ description: "Filter by project (partial path match)" })),
       verdict: Type.Optional(Type.Union([
         Type.Literal("done"),
         Type.Literal("failed"),
         Type.Literal("aborted"),
         Type.Literal("needs_input"),
-      ], { description: "Filtra per verdetto (done|failed|aborted|needs_input)" })),
-      raw: Type.Optional(Type.Boolean({ description: "true → ritorna il JSONL grezzo; default → testo leggibile" })),
+      ], { description: "Filter by verdict (done|failed|aborted|needs_input)" })),
+      raw: Type.Optional(Type.Boolean({ description: "true → return the raw JSONL; default → readable text" })),
     }),
     async execute(_toolCallId, params: { limit?: number; project?: string; verdict?: "done" | "failed" | "aborted" | "needs_input"; raw?: boolean }) {
       const mod = getFleetOutcomesSync();
       if (!mod) {
         return {
-          content: [{ type: "text", text: "fleet_outcomes: modulo outcomes non disponibile (lazy load fallito)." }],
+          content: [{ type: "text", text: "fleet_outcomes: outcomes module unavailable (lazy load failed)." }],
           details: { count: 0, file: join(STATE_HOME, "branch-outcomes.jsonl") },
         };
       }
@@ -900,7 +900,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       });
       let text: string;
       if (params.raw) {
-        text = rows.length ? rows.join("\n") : "(nessuna voce nel registro branch-outcomes)";
+        text = rows.length ? rows.join("\n") : "(no entries in the branch-outcomes registry)";
       } else {
         const lines = rows.map((row) => {
           try {
@@ -908,14 +908,14 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
             const sum = (o.summary ?? "").replace(/\s+/g, " ").trim();
             const s = sum.length > 200 ? sum.slice(0, 197) + "…" : sum;
             const files = Array.isArray(o.changedFiles) && o.changedFiles.length ? ` (${o.changedFiles.length} files)` : "";
-            return `- ${o.ts ?? "?"} · ${o.taskId ?? "?"} [${o.verdict ?? "?"}]${files} — ${s || "(nessuna summary)"}`;
+            return `- ${o.ts ?? "?"} · ${o.taskId ?? "?"} [${o.verdict ?? "?"}]${files} — ${s || "(no summary)"}`;
           } catch {
-            return `- (riga non parsabile) ${row.slice(0, 200)}`;
+            return `- (unparseable line) ${row.slice(0, 200)}`;
           }
         });
         text = rows.length
-          ? `**Registro branch-outcomes (${rows.length} righe)** — ${file}:\n${lines.join("\n")}`
-          : `(nessuna voce nel registro branch-outcomes) — ${file}`;
+          ? `**branch-outcomes registry (${rows.length} rows)** — ${file}:\n${lines.join("\n")}`
+          : `(no entries in the branch-outcomes registry) — ${file}`;
       }
       return {
         content: [{ type: "text", text }],
@@ -928,10 +928,10 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fleet_peek",
     label: "Fleet Peek",
-    description: "Legge l'ultimo output del pane herdr di un task pi-fleet.",
+    description: "Reads the latest output of a pi-fleet task's herdr pane.",
     promptSnippet: "Read the herdr pane output of a pi-fleet task",
     parameters: Type.Object({
-      id: Type.String({ description: "Task id (vedi fleet_status)" }),
+      id: Type.String({ description: "Task id (see fleet_status)" }),
     }),
     async execute(_toolCallId, params: { id: string }) {
       const task = readTask(params.id);
@@ -942,9 +942,9 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         output = res.out.slice(-4000);
         paneId = task.paneId;
       } else {
-        output = "Task o pane non trovato. Usa fleet_status.";
+        output = "Task or pane not found. Use fleet_status.";
       }
-      return { content: [{ type: "text", text: output || "(nessun output)" }], details: { taskId: params.id, paneId } };
+      return { content: [{ type: "text", text: output || "(no output)" }], details: { taskId: params.id, paneId } };
     },
   });
 
@@ -952,12 +952,12 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fleet_steer",
     label: "Fleet Steer",
-    description: "Scrive un messaggio nella prompt del figlio di un task pi-fleet (es. risposta a needs_input o correzione di rotta). Durabile per default: il messaggio persiste su disco (inbox) finché il figlio non ack; se non ackato entro un intervallo viene ripresentato (re-ring) e dopo N ripetizioni il capitano viene avvisato. replay:false = vecchio comportamento fire-and-forget.",
+    description: "Writes a message into the prompt of a pi-fleet task's child (e.g. answer to needs_input or course correction). Durable by default: the message persists on disk (inbox) until the child acks; if not acked within an interval it is re-delivered (re-ring) and after N repetitions the captain is notified. replay:false = old fire-and-forget behavior.",
     promptSnippet: "Send a message into a pi-fleet task's running child",
     parameters: Type.Object({
-      id: Type.String({ description: "Task id (vedi fleet_status)" }),
-      message: Type.String({ description: "Messaggio da inviare al figlio" }),
-      replay: Type.Optional(Type.Boolean({ description: "Messaggio durabile con ack e re-ring (default true). replay:false = fire-and-forget (vecchio comportamento)." })),
+      id: Type.String({ description: "Task id (see fleet_status)" }),
+      message: Type.String({ description: "Message to send to the child" }),
+      replay: Type.Optional(Type.Boolean({ description: "Durable message with ack and re-ring (default true). replay:false = fire-and-forget (old behavior)." })),
     }),
     async execute(_toolCallId, params: { id: string; message: string; replay?: boolean }) {
       const task = readTask(params.id);
@@ -966,9 +966,9 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       let note = "";
       let seq: number | undefined;
       if (!task) {
-        note = "Task o pane non trovato. Usa fleet_status.";
+        note = "Task or pane not found. Use fleet_status.";
       } else {
-        // 1. SCRIVI SU DISCO SEMPRE (durabile): ack/re-ring usano il file
+        // 1. ALWAYS WRITE TO DISK (durable): ack/re-ring use the file
         const inbox = getFleetInboxSync();
         if (inbox) {
           try {
@@ -976,7 +976,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
             if (enq.ok) seq = enq.seq;
           } catch { /* fail soft: fallback diretto sotto */ }
         }
-        // 2. Consegna immediata se c'è un pane vivo e stato non terminale (come oggi)
+        // 2. Immediate delivery if there is a live pane and non-terminal state (as today)
         const paneId = task.paneId;
         if (paneId && !isTerminalStateWake(task.state)) {
           const send = async (message: string): Promise<boolean> => {
@@ -988,17 +988,17 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
               delivered = await inbox.deliver(STATE_HOME, task.id, seq, send);
             } catch { delivered = false; }
           } else {
-            // fallback back-compat (modulo inbox non disponibile o enqueue fallita)
+            // back-compat fallback (inbox module unavailable or enqueue failed)
             const res = await runHerdr(["agent", "prompt", paneId, params.message], 15_000);
             delivered = res.ok;
-            if (!res.ok) note = `Invio fallito: ${res.out}`;
+            if (!res.ok) note = `Delivery failed: ${res.out}`;
           }
           if (seq !== undefined) {
             const seqTag = ` #${seq}`;
-            const modeTag = replay ? " — ack atteso" : " — fire-and-forget";
+            const modeTag = replay ? " — ack expected" : " — fire-and-forget";
             note = delivered
-              ? `Messaggio consegnato al figlio (inbox${seqTag}${modeTag}).`
-              : `Invio fallito (messaggio${seqTag} resta in inbox, verrà ripresentato).`;
+              ? `Message delivered to the child (inbox${seqTag}${modeTag}).`
+              : `Delivery failed (message${seqTag} stays in the inbox, will be re-delivered).`;
           }
           if (delivered && task.state === "needs_input") {
             task.state = "running";
@@ -1006,8 +1006,8 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
           }
         } else {
           note = seq !== undefined
-            ? `Task senza pane attivo (o stato terminale): messaggio #${seq} accodato nell'inbox (verrà consegnato dal watcher quando il task è attivo).`
-            : "Task senza pane attivo e inbox non disponibile: nulla consegnato.";
+            ? `Task without an active pane (or terminal state): message #${seq} queued in the inbox (will be delivered by the watcher when the task is active).`
+            : "Task without an active pane and inbox unavailable: nothing delivered.";
         }
       }
       let inboxPending: number | undefined;
@@ -1026,12 +1026,12 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fleet_posture",
     label: "Fleet Posture",
-    description: "Gestisce la delivery posture dei progetti (vedi T-003): no-mistakes|direct-PR|local-only|yolo. get → posture corrente; set → scrive in postures.json. La posture viene passata al figlio nel prompt come DELIVERY_POSTURE.",
+    description: "Manages the projects' delivery posture (see T-003): no-mistakes|direct-PR|local-only|yolo. get → current posture; set → writes to postures.json. The posture is passed to the child in the prompt as DELIVERY_POSTURE.",
     promptSnippet: "Get/set the delivery posture of a project (no-mistakes|direct-PR|local-only|yolo)",
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("get"), Type.Literal("set")], { description: "get → posture corrente del progetto; set → imposta e scrive in postures.json" }),
-      project: Type.String({ description: "Project: path assoluto (o short name se FLEET_PROJECTS_DIR è impostato), come fleet_launch." }),
-      posture: Type.Optional(Type.String({ description: "Delivery posture (no-mistakes|direct-PR|local-only|yolo). Solo con action=set." })),
+      action: Type.Union([Type.Literal("get"), Type.Literal("set")], { description: "get → current posture of the project; set → sets and writes to postures.json" }),
+      project: Type.String({ description: "Project: absolute path (or short name if FLEET_PROJECTS_DIR is set), like fleet_launch." }),
+      posture: Type.Optional(Type.String({ description: "Delivery posture (no-mistakes|direct-PR|local-only|yolo). Only with action=set." })),
     }),
     async execute(_toolCallId: string, params: { action: "get" | "set"; project: string; posture?: string }) {
       type Details = { ok: boolean; action: "get" | "set"; project?: string; posture?: string; error?: string };
@@ -1045,27 +1045,27 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         const mod = await getFleetPosture();
         if (!mod) {
           details = { ok: false, action: params.action };
-          text = "fleet_posture: modulo fleet-posture non disponibile.";
+          text = "fleet_posture: fleet-posture module unavailable.";
         } else if (params.action === "get") {
           const posture = mod.getPosture(resolved.path);
           details = { ok: true, action: "get", project: resolved.path, posture };
-          text = `Delivery posture di **${resolved.path}**: **${posture}** (default se non configurata: no-mistakes).`;
+          text = `Delivery posture of **${resolved.path}**: **${posture}** (default if not configured: no-mistakes).`;
         } else {
           const posture = params.posture;
           if (!posture) {
             details = { ok: false, action: "set", error: "missing posture" };
-            text = "fleet_posture: manca 'posture' con action=set (no-mistakes|direct-PR|local-only|yolo).";
+            text = "fleet_posture: missing 'posture' with action=set (no-mistakes|direct-PR|local-only|yolo).";
           } else if (!mod.isValidPosture(posture)) {
             details = { ok: false, action: "set", error: `invalid posture ${posture}` };
-            text = `fleet_posture: posture non valida '${posture}' (no-mistakes|direct-PR|local-only|yolo).`;
+            text = `fleet_posture: invalid posture '${posture}' (no-mistakes|direct-PR|local-only|yolo).`;
           } else {
             try {
               mod.setPosture(resolved.path, posture);
               details = { ok: true, action: "set", project: resolved.path, posture };
-              text = `Delivery posture di **${resolved.path}** impostata a **${posture}**.`;
+              text = `Delivery posture of **${resolved.path}** set to **${posture}**.`;
             } catch (e) {
               details = { ok: false, action: "set", error: e instanceof Error ? e.message : String(e) };
-              text = `fleet_posture: errore in scrittura: ${e instanceof Error ? e.message : String(e)}`;
+              text = `fleet_posture: write error: ${e instanceof Error ? e.message : String(e)}`;
             }
           }
         }
@@ -1078,31 +1078,31 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fleet_abort",
     label: "Fleet Abort",
-    description: "Interrompe un task pi-fleet: chiude il pane herdr (e il tab se dedicato), rilascia la worktree, marca aborted.",
+    description: "Aborts a pi-fleet task: closes the herdr pane (and the tab if dedicated), releases the worktree, marks aborted.",
     promptSnippet: "Abort a pi-fleet task (close pane/tab, release worktree)",
     parameters: Type.Object({
-      id: Type.String({ description: "Task id (vedi fleet_status)" }),
+      id: Type.String({ description: "Task id (see fleet_status)" }),
     }),
     async execute(_toolCallId, params: { id: string }) {
       const task = readTask(params.id);
       let state = "not_found";
       if (task) {
         writeFileSync(join(STATE_HOME, `${task.id}.abort`), `${Date.now()}\n`);
-        // Tab dedicato nel workspace fleet (oppure pane split di task legacy):
-        // chiudi entrambi quando presenti, tollerando fallimenti.
+        // Dedicated tab in the fleet workspace (or legacy task split pane):
+        // close both when present, tolerating failures.
         if (task.paneId) await runHerdr(["pane", "close", task.paneId], 10_000);
         if (task.tabId) await runHerdr(["tab", "close", task.tabId], 10_000);
         if (task.state === "running" || task.state === "needs_input" || task.state === "spawning") {
           task.state = "aborted";
           writeTask(task);
-          // T-004: aborted NON transita dal watcher (isTerminal lo esclude) → append qui,
-          // così l'audit trail copre anche l'abort via tool (criterio accettazione T-004)
+          // T-004: aborted does NOT transit through the watcher (isTerminal excludes it) → append here,
+          // so the audit trail also covers abort via tool (T-004 acceptance criterion)
           try { getFleetOutcomesSync()?.appendOutcome(STATE_HOME, task); } catch { /* best-effort */ }
         }
         state = task.state;
       }
       return {
-        content: [{ type: "text", text: state === "aborted" ? `Task ${params.id} in abort (pane chiuso, worktree in rilascio).` : `Task ${params.id}: stato ${state}.` }],
+        content: [{ type: "text", text: state === "aborted" ? `Task ${params.id} aborted (pane closed, worktree being released).` : `Task ${params.id}: state ${state}.` }],
         details: { taskId: params.id, state },
       };
     },
@@ -1112,19 +1112,19 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fleet_attach",
     label: "Fleet Attach",
-    description: "Porta il focus herdr sul pane di un task pi-fleet per vederlo live (ruba il focus, usalo quando serve).",
+    description: "Moves the herdr focus onto a pi-fleet task's pane to watch it live (steals focus, use when needed).",
     promptSnippet: "Focus the herdr pane of a pi-fleet task",
     parameters: Type.Object({
-      id: Type.String({ description: "Task id (vedi fleet_status)" }),
+      id: Type.String({ description: "Task id (see fleet_status)" }),
     }),
     async execute(_toolCallId, params: { id: string }) {
       const task = readTask(params.id);
       let focused = false;
-      let note = "Task non trovato. Usa fleet_status.";
+      let note = "Task not found. Use fleet_status.";
       if (task) {
         const res = await runHerdr(["agent", "focus", task.paneId ?? task.id], 10_000);
         focused = res.ok;
-        note = res.ok ? `Focus sul task ${params.id}.` : `Focus fallito: ${res.out}`;
+        note = res.ok ? `Focus on task ${params.id}.` : `Focus failed: ${res.out}`;
       }
       return { content: [{ type: "text", text: note }], details: { taskId: params.id, focused } };
     },
@@ -1134,10 +1134,10 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fleet_bootstrap",
     label: "Fleet Bootstrap",
-    description: "Verifica tool, pulizia stati stale e digest della flotta (vedi T-006)",
+    description: "Verifies tools, cleans stale state and prints a fleet digest (see T-006)",
     promptSnippet: "Verify fleet tools, clean stale state and print a fleet digest",
     parameters: Type.Object({
-      verbose: Type.Optional(Type.Boolean({ description: "Includi report completo tool-by-tool e dettaglio pulizie (default: false)" })),
+      verbose: Type.Optional(Type.Boolean({ description: "Include full tool-by-tool report and cleanup details (default: false)" })),
     }),
     async execute(_toolCallId: string, params: { verbose?: boolean }) {
       const mod = await getFleetBootstrap();
@@ -1154,18 +1154,18 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         } catch { /* fail soft */ }
         digest = mod.fleetDigest(STATE_HOME, listTasks, groupSummaries);
       } else {
-        digest = "(modulo bootstrap non disponibile — import fallito)";
+        digest = "(bootstrap module unavailable — import failed)";
       }
       const missing = tools.filter((t) => !t.ok);
       const toolLines = tools.map((t) => {
         const auth = t.auth !== undefined ? `, auth ${t.auth ? "ok" : "ko"}` : "";
-        return `  - ${t.tool} → ${t.ok ? `ok (${t.path ?? ""}${auth})` : "MANCANTE"}`;
+        return `  - ${t.tool} → ${t.ok ? `ok (${t.path ?? ""}${auth})` : "MISSING"}`;
       });
       const text = [
-        `**Bootstrap flotta** — ${missing.length > 0 ? `⚠ ${missing.length} problema/i: ${missing.map((m) => m.tool).join(", ")}` : "tutto ok"}`,
+        `**Fleet bootstrap** — ${missing.length > 0 ? `⚠ ${missing.length} problem(s): ${missing.map((m) => m.tool).join(", ")}` : "all ok"}`,
         digest,
-        `**Tool (${tools.length - missing.length}/${tools.length} ok):**\n${toolLines.join("\n")}`,
-        cleanup.length > 0 ? `**Pulizie (${cleanup.length}):**\n${cleanup.map((c) => `  - ${c}`).join("\n")}` : "**Pulizie:** nessuna",
+        `**Tools (${tools.length - missing.length}/${tools.length} ok):**\n${toolLines.join("\n")}`,
+        cleanup.length > 0 ? `**Cleanups (${cleanup.length}):**\n${cleanup.map((c) => `  - ${c}`).join("\n")}` : "**Cleanups:** none",
       ].join("\n\n");
       return {
         content: [{ type: "text", text }],
@@ -1179,12 +1179,12 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     name: "fleet_learn",
     label: "Fleet Learn",
     description:
-      "Registra un fatto operativo (learning) datato in ~/.pi/fleet/learnings.md (runtime-globale, mai in git). Dedup per titolo nelle ultime 24h: se il titolo esiste già, sostituisce la sezione invece di duplicare. Usalo per fatti evidence-backed (da quale task/osservazione) che torneranno utili nelle sessioni future.",
+      "Records a dated operational learning (fact) in ~/.pi/fleet/learnings.md (runtime-global, never in git). Dedup by title in the last 24h: if the title already exists, replaces the section instead of duplicating. Use it for evidence-backed facts (from which task/observation) that will be useful in future sessions.",
     promptSnippet: "Record an operational learning in learnings.md",
     parameters: Type.Object({
-      title: Type.String({ description: "Titolo breve del learning" }),
-      fact: Type.String({ description: "Il fatto operativo (evidence-backed: da quale task/osservazione)" }),
-      implication: Type.Optional(Type.String({ description: "Implicazione operativa (opzionale)" })),
+      title: Type.String({ description: "Short learning title" }),
+      fact: Type.String({ description: "The operational fact (evidence-backed: from which task/observation)" }),
+      implication: Type.Optional(Type.String({ description: "Operational implication (optional)" })),
     }),
     async execute(_toolCallId, params: { title: string; fact: string; implication?: string }) {
       const fl = await getFleetLearn();
@@ -1195,17 +1195,17 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       } = { ok: false, replaced: false, file: null };
       let text: string;
       if (!fl) {
-        text = "Modulo fleet-learn non caricato (import fallito).";
+        text = "fleet-learn module not loaded (import failed).";
       } else {
         try {
           const res = fl.addLearning(STATE_HOME, params.title, params.fact, params.implication);
           details.ok = true;
           details.replaced = res.replaced;
           details.file = res.path;
-          const verb = res.replaced ? "aggiornato (dedup 24h)" : "aggiunto";
+          const verb = res.replaced ? "updated (24h dedup)" : "added";
           text = `Learning ${verb}: \"${params.title}\" → ${res.path}`;
         } catch (e) {
-          text = `fleet_learn fallito: ${e instanceof Error ? e.message : String(e)}`;
+          text = `fleet_learn failed: ${e instanceof Error ? e.message : String(e)}`;
         }
       }
       return { content: [{ type: "text", text }], details };
@@ -1217,13 +1217,13 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     name: "fleet_captain_pref",
     label: "Fleet Captain Pref",
     description:
-      "Legge o scrive una preferenza del capitano in ~/.pi/fleet/captain.md (o captain-shared.md con shared:true; runtime-globale, mai in git). Formato 'chiave: valore', ordine e commenti preservati. get → valore o null; set → conferma con la riga scritta.",
+      "Reads or writes a captain preference in ~/.pi/fleet/captain.md (or captain-shared.md with shared:true; runtime-global, never in git). 'key: value' format, order and comments preserved. get → value or null; set → confirmation with the written line.",
     promptSnippet: "Get or set a captain preference",
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("get"), Type.Literal("set")], { description: "get o set" }),
-      key: Type.String({ description: "Chiave della preferenza" }),
-      value: Type.Optional(Type.String({ description: "Valore (solo con action=set)" })),
-      shared: Type.Optional(Type.Boolean({ description: "true → captain-shared.md (condivisibile); default false → captain.md" })),
+      action: Type.Union([Type.Literal("get"), Type.Literal("set")], { description: "get or set" }),
+      key: Type.String({ description: "Preference key" }),
+      value: Type.Optional(Type.String({ description: "Value (only with action=set)" })),
+      shared: Type.Optional(Type.Boolean({ description: "true → captain-shared.md (shareable); default false → captain.md" })),
     }),
     async execute(_toolCallId, params: { action: "get" | "set"; key: string; value?: string; shared?: boolean }) {
       const fl = await getFleetLearn();
@@ -1237,7 +1237,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       } = { ok: false, key: params.key, shared: params.shared ?? false, value: null, line: null, file: null };
       let text: string;
       if (!fl) {
-        text = "Modulo fleet-learn non caricato (import fallito).";
+        text = "fleet-learn module not loaded (import failed).";
       } else {
         try {
           if (params.action === "get") {
@@ -1247,17 +1247,17 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
             text = res === null ? "null" : res;
           } else {
             if (params.value === undefined) {
-              text = "fleet_captain_pref set richiede 'value'.";
+              text = "fleet_captain_pref set requires 'value'.";
             } else {
               const res = fl.setPref(STATE_HOME, params.key, params.value, { shared: params.shared ?? false });
               details.ok = true;
               details.line = res.line;
               details.file = res.path;
-              text = `Preferenza scritta: ${res.line} → ${res.path}`;
+              text = `Preference written: ${res.line} → ${res.path}`;
             }
           }
         } catch (e) {
-          text = `fleet_captain_pref fallito: ${e instanceof Error ? e.message : String(e)}`;
+          text = `fleet_captain_pref failed: ${e instanceof Error ? e.message : String(e)}`;
         }
       }
       return { content: [{ type: "text", text }], details };
@@ -1265,15 +1265,15 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     },
   });
 
-  // --- fleet_stow (T-012) — pass di pruning delle memorie, IN CODA alla lista tool ---
+  // --- fleet_stow (T-012) — memory pruning pass, AT THE END of the tool list ---
   pi.registerTool({
     name: "fleet_stow",
     label: "Fleet Stow",
-    description: "Pass di pruning delle memorie capitano/learnings. Tier aging (30gg) / perishable (7gg) / pinned; stale → refresh o archivio in ~/.pi/fleet/memory-archive.md (mai delete di unici); dedup duplicati; budget di avvio opzionale (default 7500 tok) con report di overflow. dryRun=true → solo report, zero scritture.",
+    description: "Memory pruning pass for captain/learnings. Tiers aging (30 days) / perishable (7 days) / pinned; stale → refresh or archive in ~/.pi/fleet/memory-archive.md (never delete uniques); dedup duplicates; optional startup budget (default 7500 tok) with overflow report. dryRun=true → report only, zero writes.",
     promptSnippet: "Run a memory pruning pass (stow)",
     parameters: Type.Object({
-      dryRun: Type.Optional(Type.Boolean({ description: "true → solo report, zero scritture" })),
-      verbose: Type.Optional(Type.Boolean({ description: "true → dettaglio esteso" })),
+      dryRun: Type.Optional(Type.Boolean({ description: "true → report only, zero writes" })),
+      verbose: Type.Optional(Type.Boolean({ description: "true → extended detail" })),
     }),
     async execute(_toolCallId, params: { dryRun?: boolean; verbose?: boolean }) {
       const fl = await getFleetLearn();
@@ -1287,7 +1287,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         dryRun: boolean;
       } = { refreshed: 0, archived: 0, removed: 0, overflow: 0, budget: { limitTokens: 0, usedTokens: 0, overflow: false }, ok: false, dryRun: params.dryRun === true };
       if (!fl) {
-        return { content: [{ type: "text", text: "Modulo fleet-learn non caricato (import fallito)." }], details };
+        return { content: [{ type: "text", text: "fleet-learn module not loaded (import failed)." }], details };
       }
       try {
         const report = fl.stowPass(STATE_HOME, { dryRun: params.dryRun === true });
@@ -1306,24 +1306,24 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
           `fileCounts: ${fileCounts}`,
         ];
         if (params.verbose === true) {
-          lines.push("Memorie stale/unvalidate/overflow vengono archiviate (mai cancellate: finiscono in memory-archive.md con Provenance).");
+          lines.push("Stale/unvalidated/overflow memories are archived (never deleted: they end up in memory-archive.md with Provenance).");
         }
         return {
           content: [{ type: "text", text: lines.join("\n") }],
           details,
         };
       } catch (e) {
-        const text = `fleet_stow fallito: ${e instanceof Error ? e.message : String(e)}`;
+        const text = `fleet_stow failed: ${e instanceof Error ? e.message : String(e)}`;
         return { content: [{ type: "text", text }], details };
       }
     },
   });
 
-  // ------------------------------------------------------ ciclo di vita -----
-  // L3 watcher esterno: feature flag con fallback in-process (M2)
-  // Se fleet-watch-arm.ts o bin/fleet-watch-arm.sh esistono e siamo captain,
-  // mountFleetWatchArm gestisce generation/lock/arm/wake/drain + tool fleet_watch_arm_pi.
-  // Altrimenti fallback al watcher in-process polling 3s.
+  // ------------------------------------------------------ lifecycle -----
+  // L3 external watcher: feature flag with in-process fallback (M2)
+  // If fleet-watch-arm.ts or bin/fleet-watch-arm.sh exist and we are captain,
+  // mountFleetWatchArm manages generation/lock/arm/wake/drain + the fleet_watch_arm_pi tool.
+  // Otherwise fall back to the in-process 3s polling watcher.
   const EXT_WATCH_ARM_SH = join(EXT_DIR, "..", "bin", "fleet-watch-arm.sh");
   const EXT_WATCH_ARM_TS = join(EXT_DIR, "fleet-watch-arm.ts");
   const USE_EXTERNAL_WATCHER = IS_CAPTAIN && (existsSync(EXT_WATCH_ARM_TS) || existsSync(EXT_WATCH_ARM_SH));
@@ -1345,7 +1345,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     } catch (e) {
       console.warn(`[pi-fleet] external watcher mount failed: ${e instanceof Error ? e.message : String(e)} — fallback in-process`);
     }
-    // Drain best-effort di wake pendenti anche se mount fallisce (Pi era chiuso)
+    // Best-effort drain of pending wakes even if the mount fails (Pi was closed)
     if (!externalMounted) {
       const drainScript = join(resolve(EXT_DIR, ".."), "bin", "fleet-wake-drain.sh");
       if (existsSync(drainScript)) {
@@ -1363,7 +1363,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", () => {
     if (!IS_CAPTAIN) return;
-    // L3.5: ricostruisci gruppi da disco (anche se watcher esterno monta, serve per fallback)
+    // L3.5: rebuild groups from disk (also needed for fallback if the external watcher mounts)
     void (async () => {
       try {
         const mod = await getFleetGroup();
@@ -1374,7 +1374,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       } catch { /* fail soft */ }
     })();
     if (externalMounted) {
-      // Verifica che il watcher esterno sia davvero vivo (beat fresco <90s), altrimenti fallback in-process
+      // Verify the external watcher is really alive (fresh beat <90s), otherwise in-process fallback
       let externalAlive = false;
       try {
         const beatPath = join(STATE_HOME, ".last-watcher-beat");
@@ -1403,9 +1403,9 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     })();
   });
 
-  // T-006 — bootstrap alla session_start. Hook SEPARATO da quello sopra
-  // (registrazione multipla di session_start voluta per non collidere con
-  // task paralleli che toccano il blocco esistente). Best-effort, mai bloccante.
+  // T-006 — bootstrap at session_start. SEPARATE hook from the one above
+  // (multiple session_start registrations are intentional to avoid colliding with
+  // parallel tasks touching the existing block). Best-effort, never blocking.
   pi.on("session_start", () => {
     if (!IS_CAPTAIN) return;
     void (async () => {
@@ -1425,21 +1425,21 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         const needsInputCount = listTasks().filter((t) => t.state === "needs_input").length;
         if (missing.length > 0 || needsInputCount > 0) {
           const problems: string[] = [];
-          if (missing.length > 0) problems.push(`tool mancanti: ${missing.map((m) => m.tool).join(", ")}`);
-          if (needsInputCount > 0) problems.push(`${needsInputCount} task in attesa di input`);
-          // Messaggio breve e pulito per l'utente iniziale, SENZA interrupt
-          // (triggerTurn:false): l'avvio della sessione non viene mai bloccato.
+          if (missing.length > 0) problems.push(`missing tools: ${missing.map((m) => m.tool).join(", ")}`);
+          if (needsInputCount > 0) problems.push(`${needsInputCount} task(s) awaiting input`);
+          // Short and clean message for the initial user, WITHOUT interrupt
+          // (triggerTurn:false): session startup is never blocked.
           pi.sendMessage(
             {
               customType: "fleet_bootstrap",
-              content: `[pi-fleet] All'avvio: ${problems.join("; ")}.\n${digest}`,
+              content: `[pi-fleet] At startup: ${problems.join("; ")}.\n${digest}`,
               display: true,
               details: { tools, cleanup, digest },
             },
             { triggerTurn: false, deliverAs: "followUp" },
           );
         }
-      } catch { /* fail soft: il bootstrap non deve mai bloccare l'avvio */ }
+      } catch { /* fail soft: bootstrap must never block startup */ }
     })();
   });
 
@@ -1450,8 +1450,8 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     stopWatcher = null;
   });
 
-  // 5b.5 — preferenze capitano + learnings (hook SEPARATO dal session_start L3.5 sopra:
-  // T-006/coordinamento toccano quell'area; qui si aggiunge solo best-effort captain-only)
+  // 5b.5 — captain preferences + learnings (hook SEPARATE from the L3.5 session_start above:
+  // T-006/coordination touch that area; here only best-effort captain-only is added)
   pi.on("session_start", () => {
     if (!IS_CAPTAIN) return;
     void (async () => {
@@ -1462,15 +1462,15 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         const prefs = fl.readCaptain(STATE_HOME);
         const nPrefs = fl.countPrefs(STATE_HOME);
         const nLearnings = fl.countLearnings(STATE_HOME);
-        console.log(`[pi-fleet] captain prefs: ${nPrefs} chiavi, ${nLearnings} learnings`);
+        console.log(`[pi-fleet] captain prefs: ${nPrefs} keys, ${nLearnings} learnings`);
         if (prefs.trim()) console.log(`[pi-fleet] captain.md bootstrap:\n${prefs.trimEnd()}`);
       } catch { /* best-effort */ }
     })();
   });
 
-  // T-012 — stow-lite: pass di pruning memorie (hook SEPARATO da quelli T-006/T-007,
-  // registrazione multipla di session_start voluta). Cadenza max 1 pass/giorno:
-  // guard su ~/.pi/fleet/.stow-last-pass (data odierna). Fail-soft, zero-blocking.
+  // T-012 — stow-lite: memory pruning pass (hook SEPARATE from the T-006/T-007 ones,
+  // multiple session_start registrations are intentional). Cadence max 1 pass/day:
+  // guard on ~/.pi/fleet/.stow-last-pass (today's date). Fail-soft, zero-blocking.
   pi.on("session_start", () => {
     if (!IS_CAPTAIN) return;
     void (async () => {
@@ -1490,7 +1490,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         const report = fl.stowPass(STATE_HOME, { dryRun: false });
         try {
           writeFileSync(lastPassPath, `${today}\n`, "utf8");
-        } catch { /* fail-soft: il marker è best-effort */ }
+        } catch { /* fail-soft: the marker is best-effort */ }
         console.log(
           `[pi-fleet stow] refreshed=${report.refreshed} archived=${report.archived} removed=${report.removed} overflow=${report.overflow} budget=${report.budget.usedTokens}/${report.budget.limitTokens}`,
         );
