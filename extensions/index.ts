@@ -30,6 +30,15 @@ async function getFleetGroup(): Promise<typeof import("./fleet-group.js") | null
 function getFleetGroupSync(): typeof import("./fleet-group.js") | null {
   return _fleetGroup;
 }
+// T-004 branch outcomes — helpers opzionali caricati lazy, stesso pattern di getFleetGroup
+let _fleetOutcomes: typeof import("./fleet-outcomes.js") | null = null;
+async function getFleetOutcomes(): Promise<typeof import("./fleet-outcomes.js") | null> {
+  if (_fleetOutcomes) return _fleetOutcomes;
+  try { _fleetOutcomes = await import("./fleet-outcomes.js"); return _fleetOutcomes; } catch { return null; }
+}
+function getFleetOutcomesSync(): typeof import("./fleet-outcomes.js") | null {
+  return _fleetOutcomes;
+}
 
 const EXT_DIR = dirname(fileURLToPath(import.meta.url));
 const LAUNCHER = join(EXT_DIR, "..", "bin", "herdr-launch.sh");
@@ -342,6 +351,8 @@ async function reconcileStaleTasks(): Promise<void> {
       t.state = state;
       t.doneAt = Date.now();
       writeTask(t);
+      // T-004: audit trail branch-outcomes (best-effort, non blocca il reconcile)
+      try { getFleetOutcomesSync()?.appendOutcome(STATE_HOME, t); } catch { /* best-effort */ }
     }
   }
 }
@@ -350,6 +361,8 @@ async function reconcileStaleTasks(): Promise<void> {
 const groupMap: Map<string, GroupRecord> = new Map();
 // preload barrier module async (best-effort, sync fallback usa fallbackDigest)
 void getFleetGroup().catch(() => {});
+// T-004: preload del modulo outcomes (async, best-effort) così il sync getter è pronto nel watcher
+void getFleetOutcomes().catch(() => {});
 
 function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => void {
   // Seed: gli stati GIÀ presenti all'avvio non devono fare wake (niente
@@ -369,6 +382,9 @@ function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => vo
       const prev = watch.get(task.id);
       const isTerminal = task.state === "failed" || task.state === "needs_input" || task.state === "done";
       if (prev !== task.state && isTerminal) {
+        // T-004: audit trail branch-outcomes — PRIMA della logica group/wake.
+        // Best-effort: il registro non deve mai rompere il wake.
+        try { getFleetOutcomesSync()?.appendOutcome(STATE_HOME, task); } catch { /* best-effort */ }
         // L3.5 barrier logic — groupSize su disco è un placeholder (1), si deriva
         // dal CONTEGGIO REALE dei task che condividono lo stesso groupId.
         const mod = getFleetGroupSync();
@@ -652,6 +668,63 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     },
   });
 
+  // --- fleet_outcomes ---
+  pi.registerTool({
+    name: "fleet_outcomes",
+    label: "Fleet Outcomes",
+    description: "Query/audit del registro branch-outcomes (vedi T-004): ~/.pi/fleet/branch-outcomes.jsonl, append-only, una riga JSON per transizione terminale/needs_input di ogni task. raw=true ritorna il JSONL grezzo, altrimenti un elenco leggibile.",
+    promptSnippet: "Query the branch-outcomes audit trail (append-only JSONL) for terminal/needs_input transitions",
+    parameters: Type.Object({
+      limit: Type.Optional(Type.Number({ description: "Max righe (default: 20)" })),
+      project: Type.Optional(Type.String({ description: "Filtra per progetto (match parziale sul percorso)" })),
+      verdict: Type.Optional(Type.Union([
+        Type.Literal("done"),
+        Type.Literal("failed"),
+        Type.Literal("aborted"),
+        Type.Literal("needs_input"),
+      ], { description: "Filtra per verdetto (done|failed|aborted|needs_input)" })),
+      raw: Type.Optional(Type.Boolean({ description: "true → ritorna il JSONL grezzo; default → testo leggibile" })),
+    }),
+    async execute(_toolCallId, params: { limit?: number; project?: string; verdict?: "done" | "failed" | "aborted" | "needs_input"; raw?: boolean }) {
+      const mod = getFleetOutcomesSync();
+      if (!mod) {
+        return {
+          content: [{ type: "text", text: "fleet_outcomes: modulo outcomes non disponibile (lazy load fallito)." }],
+          details: { count: 0, file: join(STATE_HOME, "branch-outcomes.jsonl") },
+        };
+      }
+      const file = mod.outcomesFile(STATE_HOME);
+      const rows = mod.queryOutcomes(STATE_HOME, {
+        limit: params.limit ?? 20,
+        project: params.project,
+        verdict: params.verdict,
+      });
+      let text: string;
+      if (params.raw) {
+        text = rows.length ? rows.join("\n") : "(nessuna voce nel registro branch-outcomes)";
+      } else {
+        const lines = rows.map((row) => {
+          try {
+            const o = JSON.parse(row) as { ts?: number; taskId?: string; verdict?: string; summary?: string; project?: string; changedFiles?: unknown[] };
+            const sum = (o.summary ?? "").replace(/\s+/g, " ").trim();
+            const s = sum.length > 200 ? sum.slice(0, 197) + "…" : sum;
+            const files = Array.isArray(o.changedFiles) && o.changedFiles.length ? ` (${o.changedFiles.length} files)` : "";
+            return `- ${o.ts ?? "?"} · ${o.taskId ?? "?"} [${o.verdict ?? "?"}]${files} — ${s || "(nessuna summary)"}`;
+          } catch {
+            return `- (riga non parsabile) ${row.slice(0, 200)}`;
+          }
+        });
+        text = rows.length
+          ? `**Registro branch-outcomes (${rows.length} righe)** — ${file}:\n${lines.join("\n")}`
+          : `(nessuna voce nel registro branch-outcomes) — ${file}`;
+      }
+      return {
+        content: [{ type: "text", text }],
+        details: { count: rows.length, file },
+      };
+    },
+  });
+
   // --- fleet_peek ---
   pi.registerTool({
     name: "fleet_peek",
@@ -726,6 +799,9 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         if (task.state === "running" || task.state === "needs_input" || task.state === "spawning") {
           task.state = "aborted";
           writeTask(task);
+          // T-004: aborted NON transita dal watcher (isTerminal lo esclude) → append qui,
+          // così l'audit trail copre anche l'abort via tool (criterio accettazione T-004)
+          try { getFleetOutcomesSync()?.appendOutcome(STATE_HOME, task); } catch { /* best-effort */ }
         }
         state = task.state;
       }
