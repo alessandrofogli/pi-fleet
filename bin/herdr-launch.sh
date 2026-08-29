@@ -126,25 +126,27 @@ AGENT_NAME="f-$(printf '%s' "$(slugify "$TITLE")" | cut -c1-23)-$(printf '%04d' 
 log "task: $TASK_ID — $TITLE"
 
 resolve_fleet_workspace() {
-  # Workspace "fleet" DEDICATA per progetto: i figli girano qui, MAI nel
+  # Workspace "fleet" DEDICATA (una sola): i figli girano qui, MAI nel
   # workspace/tab del capitano → visibili SOLO nella sidebar agents di herdr
-  # (roll-up per workspace). Idempotente e tollerante alle race dei lanci in
-  # parallelo: prima cerca (label+"cwd"), poi crea, e se la creazione fallisce
-  # (label/cwd già presa da un altro launcher) rielenca.
+  # (roll-up per workspace). `workspace list` NON espone la cwd, quindi il
+  # match è per label; se esistono più workspace "fleet" prende la prima e
+  # riusa sempre quella nei lanci successivi.
   local ws_out ws
   ws_out="$(herdr_cli workspace list)" || ws_out=""
-  ws="$(printf '%s' "$ws_out" | jq -r --arg l "fleet" --arg c "$PROJECT" \
-    '[.result.workspaces[]? | select((.label==$l) and ((.cwd // "")==$c))] | .[0].workspace_id // empty' 2>/dev/null)" \
+  ws="$(printf '%s' "$ws_out" | jq -r --arg l "fleet" \
+    '[.result.workspaces[]? | select(.label==$l)] | .[0].workspace_id // empty' 2>/dev/null)" \
     || ws=""
   [[ -n "$ws" ]] && { echo "$ws"; return 0; }
   for ((try = 1; try <= 3; try++)); do
+    # NOTA: `workspace create` risponde con .result.workspace.workspace_id
+    # (shape: .result.workspace / .result.tab / .result.root_pane).
     ws="$(herdr_cli workspace create --label "fleet" --cwd "$PROJECT" --no-focus \
-      | jq -r '.result.workspace_id // empty' 2>/dev/null)" || ws=""
+      | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)" || ws=""
     [[ -n "$ws" ]] && { log "workspace fleet creata: $ws"; echo "$ws"; return 0; }
     sleep 1
     ws_out="$(herdr_cli workspace list)" || continue
-    ws="$(printf '%s' "$ws_out" | jq -r --arg l "fleet" --arg c "$PROJECT" \
-      '[.result.workspaces[]? | select((.label==$l) and ((.cwd // "")==$c))] | .[0].workspace_id // empty' 2>/dev/null)" || ws=""
+    ws="$(printf '%s' "$ws_out" | jq -r --arg l "fleet" \
+      '[.result.workspaces[]? | select(.label==$l)] | .[0].workspace_id // empty' 2>/dev/null)" || ws=""
     [[ -n "$ws" ]] && { echo "$ws"; return 0; }
   done
   echo ""
