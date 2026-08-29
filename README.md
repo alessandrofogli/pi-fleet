@@ -179,7 +179,7 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 | `fleet_launch` | Launch a task (title, brief, `project` **required** — absolute path or short name if `FLEET_PROJECTS_DIR` is set; `model` optional; `timeoutMin` optional) |
 | `fleet_status` | List tasks, states, projects, summaries |
 | `fleet_peek <id>` | Last output of the task's pane (only for **live** tasks) |
-| `fleet_steer <id> <msg>` | Write into the child's prompt (e.g. answer a `needs_input`) |
+| `fleet_steer <id> <msg> [replay:false]` | Write into the child's prompt (answer a `needs_input`, course corrections). **Durable by default**: the message is persisted to the task inbox, delivered, and re-rung until acked (see *Durable steer & task inbox* below). `replay:false` = old fire-and-forget behavior |
 | `fleet_abort <id>` | Close pane/tab, release worktree, mark `aborted` |
 | `fleet_attach <id>` | Focus the herdr pane of the task |
 | `fleet_posture` | Get/set the delivery posture of a project (`get`/`set` + `project`; `posture` only for `set`) |
@@ -189,7 +189,19 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 
 `spawning → running → done | failed | aborted` (or `needs_input` with pane left open).
 
-State on disk in `~/.pi/fleet/`: `<id>.json` (state, title, project, cwd, pane/tab, summary, changedFiles), `<id>.done.json` / `<id>.needs-input.json` (child markers), `<id>.abort`, `<id>.log`, `tasks/<id>.brief.md`.
+State on disk in `~/.pi/fleet/`: `<id>.json` (state, title, project, cwd, pane/tab, summary, changedFiles), `<id>.done.json` / `<id>.needs-input.json` (child markers), `<id>.abort`, `<id>.log`, `tasks/<id>.brief.md`, `<id>.inbox/` (durable steer messages + ack markers + `handled/`).
+
+### Durable steer & task inbox (5b.2)
+
+`fleet_steer` is no longer fire-and-forget: the message is **first persisted to disk, then delivered**.
+
+- **On disk**: `~/.pi/fleet/<taskId>.inbox/<seq>.json` =
+  `{"seq": N, "message": "...", "createdAt": ms, "acked": false, "replays": 0}` — written atomically (tmp+rename), `seq` sequential (max existing + 1, counting `handled/`).
+- **Delivery**: if the task has a live pane and a non-terminal state, the message is delivered immediately via `herdr agent prompt` (as before); otherwise it stays queued and the in-process watcher delivers it when the task is active.
+- **Ack**: the child is instructed (CHILD_PROMPT) to create the empty marker `<taskId>.inbox/<seq>.acked` after reading/applying a message; the watcher then moves the message to `<taskId>.inbox/handled/`.
+- **Re-ring**: un-acked messages are re-delivered when ≥ `intervalMs` (default 60s) have passed since the last delivery (per-task timer in the captain's watcher, guarded against duplicates). After `maxReplays` (default 5) the captain is **woken** (`fleet_notice`, triggerTurn): *"task X non ha ackato il messaggio #seq dopo N tentativi"* — the message stays on disk (field `escalated:true`) and is not re-rung again.
+- **`replay:false`**: restores the old fire-and-forget behavior — the message carries `fireAndForget:true`, is delivered once, never re-rung.
+- **External watcher (`fleet-watch.sh`)**: best-effort only — it mentions pending inbox messages in the triage log (heartbeat). The actual re-ring/escalation is **in-process**; the bash loop stays non-blocking.
 
 ### Branch outcomes / audit trail (T-004)
 
@@ -245,6 +257,7 @@ Usa `immediate` per fail-fast: quando un errore rende inutili gli altri task del
 - **Captain gate**: extension also loads in child sessions (same settings), but watcher/reconcile/provider are active **only** where `cwd = $HOME` (or `PI_FLEET_CAPTAIN=1`) — otherwise each child would wake itself with others' `fleet_notice`
 - **Active model**: `fleet_launch` composes `--model <provider/id>` from the current main model (`ctx.model.provider`/`ctx.model.id`, fallback `PI_PROVIDER`/`PI_DEFAULT_MODEL`) — never the bare id, which `pi models` resolves only when unique and collides across providers
 - **Background-work** registry: built-in fallback (no external dependency); tasks appear in `fleet_status` only
+- **Inbox re-ring (5b.2)**: `fleet_steer` persists messages to `~/.pi/fleet/<id>.inbox/` (durable, ack marker `<seq>.acked`, moved to `handled/`); un-acked messages are re-delivered every 60s (max 5 → escalation wake of the captain via `sendAttention`, helper separate from `sendWake`). `replay:false` keeps the old fire-and-forget behavior. `fleet_status` shows `(inbox: N)` for pending messages
 
 ### L3 — Watcher esterno zero-token (`bin/fleet-watch*.sh` + `extensions/fleet-watch-arm.ts`)
 

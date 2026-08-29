@@ -311,6 +311,7 @@ Regole:
 - La worktree è in stato detached HEAD: se devi committare, crea prima un branch (git switch -c fleet/<taskid>-<slug>). NON committare mai in detached HEAD o sul branch main.
 - Non interrompere l'utente: lavora in autonomia fino alla fine.
 - Se ti serve un input dal capitano, scrivi il file $NEEDS_INPUT_PATH con {\"question\":\"...\",\"taskState\":\"needs_input\"} e FERMATI (niente domande in chat).
+- Il capitano può inviarti messaggi (fleet_steer): li trovi nella directory $STATE_HOME/$TASK_ID.inbox/ (file <seq>.json). Dopo aver LETTO e applicato un messaggio, crea il file ack $STATE_HOME/$TASK_ID.inbox/<seq>.acked (es. : > <path>). Se non acki, il messaggio verrà ripresentato e poi il capitano verrà avvisato.
 - Quando hai finito, scrivi il file $DONE_PATH in formato JSON:
 {\"status\":\"done\",\"summary\":\"...\",\"changedFiles\":[\"rel/path\"]}
 (su errore impedibile: {\"status\":\"failed\",\"summary\":\"...motivo...\"})

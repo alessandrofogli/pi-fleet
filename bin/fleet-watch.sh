@@ -280,6 +280,31 @@ while :; do
   case "$_now2" in ''|*[!0-9]*) _now2=0 ;; esac
   if [ $((_now2 - _last_heartbeat)) -ge "$HEARTBEAT" ]; then
     _last_heartbeat=$_now2
+    # T-002 (5b.2): inbox re-ring ESTERNO — decisione: BEST-EFFORT, solo menzione
+    # nella classificazione del triage (log). Il re-ring/escalation vero è
+    # in-process (extensions/fleet-inbox.ts nel capitano): questo loop bash non
+    # deve mai bloccarsi su consegne/ack, quindi qui niente enqueue_wake.
+    _inbox_summary=""
+    for _idir in "$STATE"/*.inbox; do
+      [ -d "$_idir" ] || continue
+      _inbox_n=0
+      for _ij in "$_idir"/*.json; do
+        [ -e "$_ij" ] || continue
+        _ibase=${_ij%.json}
+        [ -e "${_ibase}.acked" ] && continue
+        _iseq=${_ibase##*/}
+        case "$_iseq" in ''|*[!0-9]*) continue ;; esac
+        jq -e '.seq | type == "number"' "$_ij" >/dev/null 2>&1 || continue
+        _inbox_n=$((_inbox_n + 1))
+      done
+      if [ "$_inbox_n" -gt 0 ]; then
+        _itid=$(basename "$_idir" .inbox)
+        _inbox_summary="${_inbox_summary:+$_inbox_summary }${_itid}=$_inbox_n"
+      fi
+    done
+    if [ -n "$_inbox_summary" ]; then
+      _fleet_triage_log "inbox pending (best-effort; re-ring in-process): $_inbox_summary"
+    fi
     # Touch aggiorna anche .last-heartbeat implicito via beat; log separato
     _fleet_triage_log "heartbeat scan (no actionable)"
   else
