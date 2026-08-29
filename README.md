@@ -136,6 +136,28 @@ Set `FLEET_PROJECTS_DIR` to the parent of your repos, or just always use absolut
 
 ---
 
+## Configuration — delivery posture (per project)
+
+Each project declares a **delivery posture** that tells the child agent **how to hand over** the finished work (commit/push/PR policy). The posture is resolved at launch time — `deliveryPosture` param of `fleet_launch` **wins over** the per-project config in `~/.pi/fleet/postures.json`, which wins over the built-in default. It is passed to the child as `DELIVERY_POSTURE` in its prompt; it **instructs the child**, it never enables automatic merges/teardowns in the launcher.
+
+| Posture | Meaning |
+|---|---|
+| `no-mistakes` | Commit only with tests/CI green; never push; deliver only on explicit captain request. **Default.** |
+| `direct-PR` | At the end, if the brief authorizes it, prepare and **open** the PR (`gh pr create`) from the branch `fleet/<id>`; never merge. |
+| `local-only` | Commit locally; no push, no PR; the captain decides later. |
+| `yolo` | Like `local-only`, but authorizes pushing the branch and merge+PR **only if the brief explicitly asks for it**; never autonomously without a brief. |
+
+Manage it with `fleet_posture` (or let `fleet_launch` resolve it per task):
+
+```
+fleet_posture get project=<path>              # current posture (+ explicit default if unset)
+fleet_posture set project=<path> posture=yolo # persists to ~/.pi/fleet/postures.json (atomic write)
+```
+
+In `postures.json` the map is `{ "<projectPath>": "no-mistakes"|"direct-PR"|"local-only"|"yolo" }`. If a posture is missing or invalid, the fallback is always `no-mistakes`.
+
+---
+
 ## Usage
 
 ### Automatic delegation (just ask)
@@ -160,6 +182,7 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 | `fleet_steer <id> <msg>` | Write into the child's prompt (e.g. answer a `needs_input`) |
 | `fleet_abort <id>` | Close pane/tab, release worktree, mark `aborted` |
 | `fleet_attach <id>` | Focus the herdr pane of the task |
+| `fleet_posture` | Get/set the delivery posture of a project (`get`/`set` + `project`; `posture` only for `set`) |
 
 ### Task states
 
