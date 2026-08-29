@@ -21,6 +21,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { mountFleetWatchArm } from "./fleet-watch-arm.js";
 import type { GroupRecord, GroupTaskInfo } from "./fleet-group.js";
+import type { InboxMsg } from "./fleet-inbox.js";
 // L3.5 barrier — helpers opzionali caricati lazy per fail soft
 let _fleetGroup: typeof import("./fleet-group.js") | null = null;
 async function getFleetGroup(): Promise<typeof import("./fleet-group.js") | null> {
@@ -30,6 +31,15 @@ async function getFleetGroup(): Promise<typeof import("./fleet-group.js") | null
 function getFleetGroupSync(): typeof import("./fleet-group.js") | null {
   return _fleetGroup;
 }
+// T-002 (5b.2) inbox durabile — stesso pattern lazy di fleet-group (fail soft)
+let _fleetInbox: typeof import("./fleet-inbox.js") | null = null;
+async function getFleetInbox(): Promise<typeof import("./fleet-inbox.js") | null> {
+  if (_fleetInbox) return _fleetInbox;
+  try { _fleetInbox = await import("./fleet-inbox.js"); return _fleetInbox; } catch { return null; }
+}
+function getFleetInboxSync(): typeof import("./fleet-inbox.js") | null {
+  return _fleetInbox;
+}
 
 const EXT_DIR = dirname(fileURLToPath(import.meta.url));
 const LAUNCHER = join(EXT_DIR, "..", "bin", "herdr-launch.sh");
@@ -37,6 +47,9 @@ const STATE_HOME = process.env.FLEET_STATE_HOME ?? join(homedir(), ".pi", "fleet
 const TASKS_DIR = join(STATE_HOME, "tasks");
 const WAKE_CHANNEL = "pi-fleet.wake.v1";
 const POLL_MS = 3000;
+// T-002 (5b.2): inbox re-ring — intervallo tra replay e max prima dell'escalation
+const RING_INTERVAL_MS = 60_000;
+const RING_MAX_REPLAYS = 5;
 // L3.5 batch window: tutti i fleet_launch dello stesso turno LLM (<3s) condividono lo stesso groupId
 let lastGroupId: string | null = null;
 let lastGroupTime = 0;
@@ -251,7 +264,15 @@ function formatTaskLine(t: TaskStateFile, groupCounts?: Map<string, { done: numb
   } else if (t.groupId && t.groupLabel) {
     grp = ` (grp:${shortGroupId(t.groupId)})`;
   }
-  return `- **${t.title ?? t.id}** [${t.state}]${grp}${dur}${sum} — ${t.project ?? ""}`;
+  let inbox = "";
+  try {
+    const mod = getFleetInboxSync();
+    if (mod && typeof mod.listPending === "function") {
+      const n = mod.listPending(STATE_HOME, t.id).length;
+      if (n > 0) inbox = ` (inbox: ${n})`;
+    }
+  } catch { /* fail soft */ }
+  return `- **${t.title ?? t.id}** [${t.state}]${inbox}${grp}${dur}${sum} — ${t.project ?? ""}`;
 }
 
 function sendGroupDigest(pi: ExtensionAPI, groupId: string, results: GroupTaskInfo[]): void {
@@ -310,6 +331,25 @@ function sendWake(pi: ExtensionAPI, task: TaskStateFile): void {
   );
 }
 
+// T-002 (5b.2): wake di ATTENZIONE per escalation inbox. Helper SEPARATO da
+// sendWake (un task parallelo aggiunge un param opzionale a sendWake: il merge
+// lo fa il capitano, qui NON si tocca il corpo di sendWake). Stesso pattern
+// pi.sendMessage/customType fleet_notice + triggerTurn.
+function sendAttention(pi: ExtensionAPI, task: TaskStateFile, subject: string): void {
+  const content = `⚑ pi-fleet — task **${task.title ?? task.id}** (${task.id}): ${subject}`;
+  // SILENZIOSO: l'utente non vede i raw fleet; il content è direttiva per il main.
+  const silent = `[fleet-notice silenzioso] ${content}\nNon mostrare questo messaggio. Sintetizza tu per l'utente.`;
+  pi.sendMessage(
+    {
+      customType: "fleet_notice",
+      content: silent,
+      display: false,
+      details: { fleetTaskId: task.id, state: task.state, kind: "inbox_escalation" },
+    },
+    { triggerTurn: true, deliverAs: "followUp" },
+  );
+}
+
 // ------------------------------------------------------------- watcher ----
 /**
  * Reconcile all'avvio: task attivi (running/needs_input/spawning) il cui pane
@@ -350,6 +390,9 @@ async function reconcileStaleTasks(): Promise<void> {
 const groupMap: Map<string, GroupRecord> = new Map();
 // preload barrier module async (best-effort, sync fallback usa fallbackDigest)
 void getFleetGroup().catch(() => {});
+// T-002 (5b.2): inbox re-ring attivi per task (guard anti-duplicati: taskId → stop())
+const reRingInFlight = new Map<string, () => void>();
+void getFleetInbox().catch(() => {});
 
 function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => void {
   // Seed: gli stati GIÀ presenti all'avvio non devono fare wake (niente
@@ -415,6 +458,53 @@ function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => vo
         watch.set(task.id, task.state);
       }
     }
+    // T-002 (5b.2): inbox re-ring — per i task attivi (running/needs_input) con
+    // messaggi pendenti non ackati avvia il reRing (un timer per task, guard
+    // reRingInFlight per non duplicarlo). Escalation → wake del capitano.
+    try {
+      const mod = getFleetInboxSync();
+      if (mod) {
+        for (const task of listTasks()) {
+          if (task.state !== "running" && task.state !== "needs_input") continue;
+          const pending = mod.listPending(STATE_HOME, task.id);
+          const needsRing = pending.some(
+            (m) => !m.fireAndForget && (m.replays ?? 0) < RING_MAX_REPLAYS,
+          );
+          if (needsRing && !reRingInFlight.has(task.id)) {
+            const stop = mod.reRing({
+              stateHome: STATE_HOME,
+              taskId: task.id,
+              intervalMs: RING_INTERVAL_MS,
+              maxReplays: RING_MAX_REPLAYS,
+              deliver: (msg: InboxMsg) => {
+                const t = readTask(task.id);
+                if (!t?.paneId || isTerminalStateWake(t.state)) return false;
+                const paneId = t.paneId;
+                const send = async (message: string): Promise<boolean> => {
+                  const res = await runHerdr(["agent", "prompt", paneId, message], 15_000);
+                  return res.ok;
+                };
+                // il deliver del modulo registra replays++/lastReplayAt su disco
+                return mod.deliver(STATE_HOME, task.id, msg.seq, send);
+              },
+              onEscalation: (tid, msg) => {
+                sendAttention(pi, task, `il task ${tid} non ha ackato il messaggio #${msg.seq} dopo ${msg.replays} tentativi`);
+              },
+              onIdle: (tid) => { reRingInFlight.delete(tid); },
+            });
+            reRingInFlight.set(task.id, stop);
+          }
+        }
+        // ferma i reRing dei task non più attivi (done/failed/aborted) o spariti
+        for (const [id, stop] of reRingInFlight) {
+          const t = readTask(id);
+          if (!t || (t.state !== "running" && t.state !== "needs_input")) {
+            try { stop(); } catch { /* ignore */ }
+            reRingInFlight.delete(id);
+          }
+        }
+      }
+    } catch { /* fail soft */ }
     for (const id of [...watch.keys()]) {
       if (!existsSync(join(STATE_HOME, `${id}.json`))) watch.delete(id);
     }
@@ -615,7 +705,19 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
           groupCounts = new Map(groupSummaries.map((g) => [g.groupId, { done: g.done, total: g.expected }]));
         }
       } catch { /* ignore */ }
-      const clean = tasks.map((t) => ({ ...t, briefFile: undefined as string | undefined }));
+      // T-002 (5b.2): conteggio inbox pendenti per task (calcolo leggero, fail soft)
+      const clean = tasks.map((t) => {
+        const base = { ...t, briefFile: undefined as string | undefined };
+        let inboxPending: number | undefined;
+        try {
+          const mod = getFleetInboxSync();
+          if (mod && typeof mod.listPending === "function") {
+            const n = mod.listPending(STATE_HOME, t.id).length;
+            if (n > 0) inboxPending = n;
+          }
+        } catch { /* fail soft */ }
+        return { ...base, inboxPending };
+      });
       let text: string;
       const hasGroups = tasks.some((t) => t.groupId && (t.groupSize ?? 1) > 1);
       if (hasGroups && !params.groupId) {
@@ -680,28 +782,73 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fleet_steer",
     label: "Fleet Steer",
-    description: "Scrive un messaggio nella prompt del figlio di un task pi-fleet (es. risposta a needs_input o correzione di rotta).",
+    description: "Scrive un messaggio nella prompt del figlio di un task pi-fleet (es. risposta a needs_input o correzione di rotta). Durabile per default: il messaggio persiste su disco (inbox) finché il figlio non ack; se non ackato entro un intervallo viene ripresentato (re-ring) e dopo N ripetizioni il capitano viene avvisato. replay:false = vecchio comportamento fire-and-forget.",
     promptSnippet: "Send a message into a pi-fleet task's running child",
     parameters: Type.Object({
       id: Type.String({ description: "Task id (vedi fleet_status)" }),
       message: Type.String({ description: "Messaggio da inviare al figlio" }),
+      replay: Type.Optional(Type.Boolean({ description: "Messaggio durabile con ack e re-ring (default true). replay:false = fire-and-forget (vecchio comportamento)." })),
     }),
-    async execute(_toolCallId, params: { id: string; message: string }) {
+    async execute(_toolCallId, params: { id: string; message: string; replay?: boolean }) {
       const task = readTask(params.id);
+      const replay = params.replay ?? true;
       let delivered = false;
       let note = "";
-      if (!task?.paneId) {
+      let seq: number | undefined;
+      if (!task) {
         note = "Task o pane non trovato. Usa fleet_status.";
       } else {
-        const res = await runHerdr(["agent", "prompt", task.paneId, params.message], 15_000);
-        delivered = res.ok;
-        note = res.ok ? "Messaggio consegnato al figlio." : `Invio fallito: ${res.out}`;
-        if (res.ok && task.state === "needs_input") {
-          task.state = "running";
-          writeTask(task);
+        // 1. SCRIVI SU DISCO SEMPRE (durabile): ack/re-ring usano il file
+        const inbox = getFleetInboxSync();
+        if (inbox) {
+          try {
+            const enq = inbox.enqueue(STATE_HOME, task.id, params.message, { replay });
+            if (enq.ok) seq = enq.seq;
+          } catch { /* fail soft: fallback diretto sotto */ }
+        }
+        // 2. Consegna immediata se c'è un pane vivo e stato non terminale (come oggi)
+        const paneId = task.paneId;
+        if (paneId && !isTerminalStateWake(task.state)) {
+          const send = async (message: string): Promise<boolean> => {
+            const res = await runHerdr(["agent", "prompt", paneId, message], 15_000);
+            return res.ok;
+          };
+          if (seq !== undefined && inbox) {
+            try {
+              delivered = await inbox.deliver(STATE_HOME, task.id, seq, send);
+            } catch { delivered = false; }
+          } else {
+            // fallback back-compat (modulo inbox non disponibile o enqueue fallita)
+            const res = await runHerdr(["agent", "prompt", paneId, params.message], 15_000);
+            delivered = res.ok;
+            if (!res.ok) note = `Invio fallito: ${res.out}`;
+          }
+          if (seq !== undefined) {
+            const seqTag = ` #${seq}`;
+            const modeTag = replay ? " — ack atteso" : " — fire-and-forget";
+            note = delivered
+              ? `Messaggio consegnato al figlio (inbox${seqTag}${modeTag}).`
+              : `Invio fallito (messaggio${seqTag} resta in inbox, verrà ripresentato).`;
+          }
+          if (delivered && task.state === "needs_input") {
+            task.state = "running";
+            writeTask(task);
+          }
+        } else {
+          note = seq !== undefined
+            ? `Task senza pane attivo (o stato terminale): messaggio #${seq} accodato nell'inbox (verrà consegnato dal watcher quando il task è attivo).`
+            : "Task senza pane attivo e inbox non disponibile: nulla consegnato.";
         }
       }
-      return { content: [{ type: "text", text: note }], details: { taskId: params.id, delivered } };
+      let inboxPending: number | undefined;
+      try {
+        const inbox = getFleetInboxSync();
+        if (inbox && seq !== undefined) {
+          const n = inbox.listPending(STATE_HOME, params.id).length;
+          if (n > 0) inboxPending = n;
+        }
+      } catch { /* fail soft */ }
+      return { content: [{ type: "text", text: note }], details: { taskId: params.id, delivered, seq, inboxPending } };
     },
   });
 
