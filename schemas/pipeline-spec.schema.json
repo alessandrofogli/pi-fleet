@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pi-fleet.local/schemas/pipeline-spec.schema.json",
+  "title": "PipelineSpec",
+  "description": "Machine schema for a pi-fleet pipeline spec. Generated from and validated against docs/pipeline-spec.md (the Markdown there is the source of truth; unknown keys are rejected, every key is required at its level).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scope", "slices", "checks"],
+  "properties": {
+    "scope": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Free-form description of the work covered by the pipeline: the ticket/objective, the acceptance target, and the boundary of what the loop may touch. Defines the scope-control boundary for reviewers and fixers."
+    },
+    "slices": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/slice" }
+    },
+    "checks": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/check" }
+    }
+  },
+  "definitions": {
+    "slice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "impl_skills", "review_skills", "deps"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "Unique, stable, lowercase slug identifying the slice (e.g. py-core). Referenced by other slices via deps."
+        },
+        "title": { "type": "string", "minLength": 1 },
+        "impl_skills": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Skill names that guide/constrain the implementation (may be empty)."
+        },
+        "review_skills": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Review skill names that MUST be evaluated for this slice; each entry maps to one reviewer. The loop must never silently skip a configured skill."
+        },
+        "deps": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Slice ids that must be completed before this slice starts (may be empty). Must reference valid slice ids; cycles are invalid."
+        }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "cmd"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "description": "Short unique identifier (e.g. typecheck, test, lint)." },
+        "cmd": { "type": "string", "minLength": 1, "description": "Shell command run from the project root. Exit code 0 = pass; non-zero = fail." }
+      }
+    }
+  }
+}
