@@ -160,12 +160,27 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 | `fleet_steer <id> <msg>` | Write into the child's prompt (e.g. answer a `needs_input`) |
 | `fleet_abort <id>` | Close pane/tab, release worktree, mark `aborted` |
 | `fleet_attach <id>` | Focus the herdr pane of the task |
+| `fleet_outcomes` | Query/audit del registro `branch-outcomes.jsonl` (`limit`/`project`/`verdict`/`raw`) |
 
 ### Task states
 
 `spawning → running → done | failed | aborted` (or `needs_input` with pane left open).
 
 State on disk in `~/.pi/fleet/`: `<id>.json` (state, title, project, cwd, pane/tab, summary, changedFiles), `<id>.done.json` / `<id>.needs-input.json` (child markers), `<id>.abort`, `<id>.log`, `tasks/<id>.brief.md`.
+
+### Branch outcomes / audit trail (T-004)
+
+Registro **append-only** `~/.pi/fleet/branch-outcomes.jsonl`: una riga JSON per ogni **transizione terminale** di un task (`done`/`failed`/`aborted`) e per ogni evento `needs_input` (rilevante ma non terminale). Erede dello store `fm_branch_outcomes` di Firstmate.
+
+Formato riga (una riga = un JSON, `\n` terminato):
+
+```json
+{"ts": 1724800000000, "taskId": "...", "title": "...", "project": "...", "verdict": "done|failed|aborted|needs_input", "summary": "...", "changedFiles": ["..."], "reportPath": null, "groupId": "grp-..." }
+```
+
+- **Scrittura**: `extensions/fleet-outcomes.ts` (`appendOutcome`), hook in `extensions/index.ts` — ramo transizione terminale del watcher (3s poll), `reconcileStaleTasks` (zombie → done/failed/aborted) e `fleet_abort` (aborted via tool). Best-effort e con **dedup in-process** (chiave `taskId+verdict+doneAt`): la stessa transizione non viene mai scritta due volte e non rompe mai il wake.
+- **Query**: tool `fleet_outcomes` (filtri `limit` default 20, `project` match parziale, `verdict`, `raw` per il JSONL grezzo; `details.count`/`details.file`), oppure `queryOutcomes()` nel modulo.
+- **Note**: append-only — non si modifica mai retroattivamente; righe corrotte vengono ignorate in lettura.
 
 ### Gruppi di task (L3.5)
 
