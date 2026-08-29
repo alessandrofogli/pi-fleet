@@ -263,7 +263,7 @@ interface FleetLaunchParams {
   kind?: "ship" | "scout";
   deliveryPosture?: string;
   groupFailPolicy?: "waitAll" | "immediate";
-  // T-011 gate: attivo solo quando posture no-mistakes E gate.yaml nel progetto
+  // T-011 gate: active only when posture is no-mistakes AND gate.yaml exists in the project
   gate?: boolean;
   autoPr?: boolean;
 }

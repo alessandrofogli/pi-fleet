@@ -33,7 +33,7 @@ A [Firstmate](https://github.com/kunchenguid/firstmate)-like experience inside p
 
 - **Not child processes**: each sub-agent is an **independent pi session** in a herdr pane. Coordination is via **shared state files in `~/.pi/fleet/`**.
 - Child model = **active model of the main at launch time** (`ctx.model`), unless you pass an explicit `model`.
-- Worktree **always** by default; never auto-merges; PRs only on explicit confirmation or opt-in gate config (`gate.yaml` with `autoPr: true` — see *Configuration — gate di consegna*)
+- Worktree **always** by default; never auto-merges; PRs only on explicit confirmation or opt-in gate config (`gate.yaml` with `autoPr: true` — see *Configuration — delivery gate*)
 
 ---
 
@@ -163,38 +163,38 @@ In `postures.json` the map is `{ "<projectPath>": "no-mistakes"|"direct-PR"|"loc
 
 ---
 
-## Configuration — gate di consegna (opzionale)
+## Configuration — delivery gate (optional)
 
-Su progetti con posture `no-mistakes`, il task può passare da un **gate meccanico deterministico** prima della consegna: task implementa → gate (`bin/gate-run.sh`, solo exit code di processi, nessun AI nel gate) → se rosso **loop di self-fix del figlio** (fixa SOLO ciò che il report segnala, max `loop.maxRounds`) → **verifica finale anti-frode nel launcher** → **PR automatica SOLO se configurata**. Il merge non è MAI automatico (autorità = capitano).
+On projects with `no-mistakes` posture, the task can pass through a **deterministic mechanical gate** before delivery: task implements → gate (`bin/gate-run.sh`, only process exit codes, no AI in the gate) → if red **child self-fix loop** (fix ONLY what the report flags, max `loop.maxRounds`) → **final anti-fraud verification in the launcher** → **automatic PR ONLY if configured**. The merge is NEVER automatic (authority = captain).
 
-### Contratto `gate.yaml` (tracked nella root del repo gated)
+### `gate.yaml` contract (tracked at the root of the gated repo)
 
 ```yaml
-posture: no-mistakes        # allineata a postures.json (default no-mistakes)
-autoPr: true                # PR automatica a gate verde — default false
+posture: no-mistakes        # aligned with postures.json (default no-mistakes)
+autoPr: true                # automatic PR on green gate — default false
 loop:
-  maxRounds: 5              # tetto round self-fix del figlio (default 5)
+  maxRounds: 5              # child self-fix round cap (default 5)
 checks:
   - { name: typecheck, cmd: npx tsc --noEmit,            kind: hard }
   - { name: test,      cmd: npm test,                    kind: hard }
-  - { name: impact,    cmd: no-mistakes impacted-checks, kind: hard }   # opzionale (engine no-mistakes)
+  - { name: impact,    cmd: no-mistakes impacted-checks, kind: hard }   # optional (no-mistakes engine)
   - { name: resolve,   cmd: no-mistakes resolve-check,   kind: advisory }
 ```
 
-- `kind: hard` → obbligatorio exit 0 per il verde; `advisory` → va nel report, non blocca.
-- **Config assente** (o posture ≠ no-mistakes) → comportamento attuale invariato: niente gate. Se il gate è attivo ma `gate.yaml` manca nel fallback: checks default `typecheck` (se tsconfig), `test` (se script test), `git diff --check`, `git status` pulito (tutti hard) — MAI bloccante su config assente (`autoPr` false).
+- `kind: hard` → required exit 0 for green; `advisory` → goes in the report, does not block.
+- **Missing config** (or posture ≠ no-mistakes) → current behavior unchanged: no gate. If the gate is active but `gate.yaml` is missing in the fallback: default checks `typecheck` (if tsconfig), `test` (if test script), `git diff --check`, clean `git status` (all hard) — NEVER blocking on missing config (`autoPr` false).
 
-### Come funziona (flusso)
+### How it works (flow)
 
-1. L'estensione (`fleet_launch`) rileva `posture == no-mistakes` **E** `gate.yaml` nel progetto → passa `--gate [--auto-pr true|false]` al launcher.
-2. Il figlio riceve la sezione **GATE** nel prompt: dopo l'implementazione esegue `bash <pi-fleet>/bin/gate-run.sh --report gate/report.json`; rosso → fixa solo ciò che il report segnala e ri-esegue (max `maxRounds`); **MAI done-marker con gate rosso**; a verde mette `gate:{passed,rounds,reportPath}` nel done-marker.
-3. Il launcher, dopo il done-marker e PRIMA di finalizzare, **riesegue lui stesso** il gate sulla worktree allo stato finale (anti-frode: il figlio non può barare):
-   - rosso/errore → task `failed` con il report, tab chiuso, **nessuna PR**;
-   - verde + `autoPr:true` → `gh-axi pr create --head <branch> --base main --title "<titolo>" --body-file <report>` (retry leggeri 2×3s su busy; gh-axi assente → fallback `npx -y gh-axi`); `prUrl` + `gate` mergiati nello stato;
-   - verde + `autoPr:false` → `done` senza PR.
-4. `fleet_status` mostra il suffisso `(gate:✓/✗)` e `(pr:#N)` quando presenti.
+1. The extension (`fleet_launch`) detects `posture == no-mistakes` **AND** `gate.yaml` in the project → passes `--gate [--auto-pr true|false]` to the launcher.
+2. The child receives the **GATE** section in the prompt: after the implementation it runs `bash <pi-fleet>/bin/gate-run.sh --report gate/report.json`; red → fixes only what the report flags and re-runs (max `maxRounds`); **NEVER done-marker with a red gate**; on green it puts `gate:{passed,rounds,reportPath}` in the done-marker.
+3. The launcher, after the done-marker and BEFORE finalizing, **re-runs the gate itself** on the worktree at the final state (anti-fraud: the child cannot cheat):
+   - red/error → task `failed` with the report, tab closed, **no PR**;
+   - green + `autoPr:true` → `gh-axi pr create --head <branch> --base main --title "<title>" --body-file <report>` (light retries 2×3s on busy; gh-axi absent → fallback `npx -y gh-axi`); `prUrl` + `gate` merged into the state;
+   - green + `autoPr:false` → `done` without PR.
+4. `fleet_status` shows the `(gate:✓/✗)` and `(pr:#N)` suffixes when present.
 
-`gh-axi` (0.1.34+) è installato globalmente (vedi `bin/setup-fleet.sh`, che lo assicura). Serve un **remote GitHub** sul repo: senza remote la PR non può essere creata (il case PR vero è fuori dallo smoke automatico — vedi *Testing*).
+`gh-axi` (0.1.34+) is installed globally (see `bin/setup-fleet.sh`, which ensures it). A **GitHub remote** is required on the repo: without a remote the PR cannot be created (the real PR case is outside the automatic smoke — see *Testing*).
 
 ---
 
@@ -218,87 +218,87 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 
 | Tool | What it does |
 |---|---|
-| `fleet_launch` | Launch a task (title, brief, `project` **required** — absolute path or short name if `FLEET_PROJECTS_DIR` is set; `model` optional; `timeoutMin` optional; `kind` optional: `ship` (default) o `scout` solo-indagine) |
+| `fleet_launch` | Launch a task (title, brief, `project` **required** — absolute path or short name if `FLEET_PROJECTS_DIR` is set; `model` optional; `timeoutMin` optional; `kind` optional: `ship` (default) or `scout` investigation-only) |
 | `fleet_status` | List tasks, states, projects, summaries |
 | `fleet_peek <id>` | Last output of the task's pane (only for **live** tasks) |
 | `fleet_steer <id> <msg> [replay:false]` | Write into the child's prompt (answer a `needs_input`, course corrections). **Durable by default**: the message is persisted to the task inbox, delivered, and re-rung until acked (see *Durable steer & task inbox* below). `replay:false` = old fire-and-forget behavior |
 | `fleet_abort <id>` | Close pane/tab, release worktree, mark `aborted` |
 | `fleet_attach <id>` | Focus the herdr pane of the task |
 | `fleet_posture` | Get/set the delivery posture of a project (`get`/`set` + `project`; `posture` only for `set`) |
-| `fleet_outcomes` | Query/audit del registro `branch-outcomes.jsonl` (`limit`/`project`/`verdict`/`raw`) |
+| `fleet_outcomes` | Query/audit the `branch-outcomes.jsonl` registry (`limit`/`project`/`verdict`/`raw`) |
 | `fleet_bootstrap` | Verify tools, clean stale state, print a fleet digest (optional `verbose`) |
 | `fleet_learn` | Record an operational learning in `learnings.md` (`title`, `fact`, `implication?`) |
 | `fleet_captain_pref` | Get/set a captain preference (`action`, `key`, `value?` per set, `shared?`) |
-| `fleet_stow` | Memory pruning pass (`dryRun?`, `verbose?`); stale entries refreshed or archived, dedup, optional budget — see *Memorie: pruning* |
+| `fleet_stow` | Memory pruning pass (`dryRun?`, `verbose?`); stale entries refreshed or archived, dedup, optional budget — see *Memories: pruning* |
 | `fleet_watch_arm_pi` | Start the first watcher cycle or repair a cycle reported missing/failed/unhealthy (re-arming is otherwise automatic) |
 
-#### Task scout (solo-indagine)
+#### Scout tasks (investigation-only)
 
-Con `kind: "scout"` il figlio produce **solo** un `report.md` nella root del cwd: **non committa, non fa push, non apre PR**. Nel done-marker aggiunge `reportPath` (es. `"reportPath":"report.md"`), che il launcher mergia anche nello stato del task (`~/.pi/fleet/<id>.json`). Default `ship` = comportamento attuale (commit su branch dedicato + done-marker).
+With `kind: "scout"` the child produces **only** a `report.md` at the root of the cwd: **no commit, no push, no PR**. In the done-marker it adds `reportPath` (e.g. `"reportPath":"report.md"`), which the launcher also merges into the task state (`~/.pi/fleet/<id>.json`). Default `ship` = current behavior (commit on a dedicated branch + done-marker).
 
 ```
 fleet_launch(
-  title: "Scout: controlla il setup DB",
-  brief: "Analizza la config di my-app e riporta i problemi trovati.",
+  title: "Scout: check the DB setup",
+  brief: "Analyze my-app's config and report the found problems.",
   project: "my-app",
   kind: "scout"
 )
 ```
 
 
-### Preferenze capitano e learnings persistenti
+### Persistent captain preferences and learnings
 
-Preferenze del capitano e fatti operativi vivono in `~/.pi/fleet/` (runtime-globale, **mai in git**) e
-sono disponibili a ogni `session_start` del capitano (il log di avvio riporta `captain prefs: <n> chiavi, <m> learnings`).
+Captain preferences and operational facts live in `~/.pi/fleet/` (runtime-global, **never in git**) and
+are available at every captain `session_start` (the startup log reports `captain prefs: <n> keys, <m> learnings`).
 
-| Tool | Cosa fa |
+| Tool | What it does |
 |---|---|
-| `fleet_captain_pref` | `action: "get" \| "set"`, `key`, `value` (solo set), `shared` (default `false` → `captain.md`; `true` → `captain-shared.md`). Get → valore o `null`; set → conferma con la riga scritta. |
-| `fleet_learn` | `title`, `fact`, `implication?`, `opts?` (`tier`: `"aging"` \| `"perishable"` \| `"pinned"`, default `aging`; `expiry` obbligatoria per `perishable`, es. "dopo il deploy di v0.4"). Appende una sezione datata a `learnings.md`; dedup per titolo nelle ultime 24h (sostituisce la sezione invece di duplicare). |
-| `fleet_stow` | `dryRun?`, `verbose?` — pass di pruning delle memorie: stale → refresh o archivio; dedup; budget. `dryRun: true` → solo report, zero scritture. |
+| `fleet_captain_pref` | `action: "get" \| "set"`, `key`, `value` (set only), `shared` (default `false` → `captain.md`; `true` → `captain-shared.md`). Get → value or `null`; set → confirmation with the written line. |
+| `fleet_learn` | `title`, `fact`, `implication?`, `opts?` (`tier`: `"aging"` \| `"perishable"` \| `"pinned"`, default `aging`; `expiry` required for `perishable`, e.g. "after the v0.4 deploy"). Appends a dated section to `learnings.md`; dedup by title in the last 24h (replaces the section instead of duplicating). |
+| `fleet_stow` | `dryRun?`, `verbose?` — memory pruning pass: stale → refresh or archive; dedup; budget. `dryRun: true` → report only, zero writes. |
 
-**Formato dei file** (righe `chiave: valore`, commenti `#`, sezioni `##` libere):
+**File format** (`key: value` lines, `#` comments, free `##` sections):
 
-- `captain.md` — preferenze locali a questa macchina, es.:
+- `captain.md` — preferences local to this machine, e.g.:
   ```
-  # Preferenze capitano
+  # Captain preferences
   default_timeout_min: 360
   prefer_report_markdown: true
   ```
-- `captain-shared.md` — idem, ma condivisibile (per il futuro secondmate).
-- `learnings.md` — entry datate:
+- `captain-shared.md` — same, but shareable (for the future secondmate).
+- `learnings.md` — dated entries:
   ```
-  ## 2026-08-29 — titolo breve
-  Fatto: ... (evidence-backed: da quale task/osservazione).
-  Implicazione: ...
+  ## 2026-08-29 — short title
+  Fact: ... (evidence-backed: from which task/observation).
+  Implication: ...
   ```
 
-I tre file vengono creati con header se assenti (`ensureFiles` alla `session_start`); gli aggiornamenti
-sono curati (niente append infinito) e scritti atomicamente (tmp+rename).
+The three files are created with headers if absent (`ensureFiles` at `session_start`); the updates
+are curated (no infinite appends) and written atomically (tmp+rename).
 
-### Memorie: pruning
+### Memories: pruning
 
-Le memorie non crescono all'infinito: un **pass** (`fleet_stow`, o automatico a `session_start` del
-capitano, max 1 pass/giorno via `~/.pi/fleet/.stow-last-pass`) applica i **tier** con orizzonte di
-decadimento e ri-valida → **refresh** o **archiviazione** in `~/.pi/fleet/memory-archive.md`.
+Memories never grow unbounded: a **pass** (`fleet_stow`, or automatic at the captain's `session_start`,
+max 1 pass/day via `~/.pi/fleet/.stow-last-pass`) applies the **tiers** with a decay horizon and
+re-validates → **refresh** or **archive** in `~/.pi/fleet/memory-archive.md`.
 
-**Tier** (marker embedded in coda all'entry, invisibili nel rendering):
+**Tiers** (embedded marker at the end of the entry, invisible in rendering):
 
-| Tier | Marker | Decadimento | Default per |
+| Tier | Marker | Decay | Default for |
 |---|---|---|---|
-| `pinned` | nessuno (`<!--pin-->` in learnings) | mai invecchia, esente da decay e budget | `captain.md` / `captain-shared.md` |
-| `aging` | `<!--a:YYYY-MM-DD-->` | stale a ≥30 giorni → refresh (data=oggi) se confermata, altrimenti archivio | `learnings.md` |
-| `perishable` | `<!--p:YYYY-MM-DD-->` | stale a ≥7 giorni; la prosa DEVE nominare una condizione di scadenza (riga `Scadenza:`), altrimenti trattata come `aging` | — |
+| `pinned` | none (`<!--pin-->` in learnings) | never ages, exempt from decay and budget | `captain.md` / `captain-shared.md` |
+| `aging` | `<!--a:YYYY-MM-DD-->` | stale at ≥30 days → refresh (date=today) if confirmed, otherwise archive | `learnings.md` |
+| `perishable` | `<!--p:YYYY-MM-DD-->` | stale at ≥7 days; the prose MUST name an expiry condition (`Expiry:` line), otherwise treated as `aging` | — |
 
-**Comportamento del pass** (`fleet_stow`, `dryRun: true` → solo report):
+**Pass behavior** (`fleet_stow`, `dryRun: true` → report only):
 
-- stale unico → **refreshed** (rinnovo data marker) o **archiviato** in `memory-archive.md` (sezione `## YYYY-MM-DD — <entry>` + `Provenance: stowed`) — **MAI delete di un fatto unico**;
-- duplicati / fatti già posseduti → rimozione (capitans: chiavi duplicate; learnings: titoli duplicati);
-- **migrazione one-time**: entry legacy senza marker → confermata = stampa marker di oggi (30gg di grace); entry `<!--g-->` non ri-validata al pass successivo → archivio con `Provenance: legacy-unvalidated` (la conferma avviene ri-aggiungendo la learning: il dedup 24h rigenera il marker);
-- **budget opzionale**: `~/.pi/fleet/startup-memory-budget` (default **7500 token stimati**, `ceil(byte/3)` per file, somma sui 3 file) → sopra soglia archivia i non-pinned più vecchi (mai pinned) e riporta overflow. Zero-config: report + archivio, nessun enforcement più severo.
+- unique stale → **refreshed** (marker date renewed) or **archived** in `memory-archive.md` (section `## YYYY-MM-DD — <entry>` + `Provenance: stowed`) — **NEVER delete of a unique fact**;
+- duplicates / already-owned facts → removed (captains: duplicate keys; learnings: duplicate titles);
+- **one-time migration**: legacy entry without marker → confirmed = stamps today's marker (30 days of grace); `<!--g-->` entry not re-validated at the next pass → archive with `Provenance: legacy-unvalidated` (confirmation happens by re-adding the learning: the 24h dedup regenerates the marker);
+- **optional budget**: `~/.pi/fleet/startup-memory-budget` (default **7500 estimated tokens**, `ceil(byte/3)` per file, sum over the 3 files) → over the threshold archives the oldest non-pinned (never pinned) and reports the overflow. Zero-config: report + archive, no stricter enforcement.
 
-Il decay scatta **solo al pass** (nessun timer in background); il pass automatico alla `session_start` è
-best-effort, mai bloccante, con guard su `.stow-last-pass` (1 pass/giorno).
+The decay fires **only at the pass** (no background timer); the automatic pass at `session_start` is
+best-effort, never blocking, with the `.stow-last-pass` guard (1 pass/day).
 
 
 ### Task states
@@ -315,40 +315,40 @@ State on disk in `~/.pi/fleet/`: `<id>.json` (state, title, project, cwd, pane/t
   `{"seq": N, "message": "...", "createdAt": ms, "acked": false, "replays": 0}` — written atomically (tmp+rename), `seq` sequential (max existing + 1, counting `handled/`).
 - **Delivery**: if the task has a live pane and a non-terminal state, the message is delivered immediately via `herdr agent prompt` (as before); otherwise it stays queued and the in-process watcher delivers it when the task is active.
 - **Ack**: the child is instructed (CHILD_PROMPT) to create the empty marker `<taskId>.inbox/<seq>.acked` after reading/applying a message; the watcher then moves the message to `<taskId>.inbox/handled/`.
-- **Re-ring**: un-acked messages are re-delivered when ≥ `intervalMs` (default 60s) have passed since the last delivery (per-task timer in the captain's watcher, guarded against duplicates). After `maxReplays` (default 5) the captain is **woken** (`fleet_notice`, triggerTurn): *"task X non ha ackato il messaggio #seq dopo N tentativi"* — the message stays on disk (field `escalated:true`) and is not re-rung again.
+- **Re-ring**: un-acked messages are re-delivered when ≥ `intervalMs` (default 60s) have passed since the last delivery (per-task timer in the captain's watcher, guarded against duplicates). After `maxReplays` (default 5) the captain is **woken** (`fleet_notice`, triggerTurn): *"task X did not ack message #seq after N attempts"* — the message stays on disk (field `escalated:true`) and is not re-rung again.
 - **`replay:false`**: restores the old fire-and-forget behavior — the message carries `fireAndForget:true`, is delivered once, never re-rung.
 - **External watcher (`fleet-watch.sh`)**: best-effort only — it mentions pending inbox messages in the triage log (heartbeat). The actual re-ring/escalation is **in-process**; the bash loop stays non-blocking.
 
 ### Branch outcomes / audit trail
 
-Registro **append-only** `~/.pi/fleet/branch-outcomes.jsonl`: una riga JSON per ogni **transizione terminale** di un task (`done`/`failed`/`aborted`) e per ogni evento `needs_input` (rilevante ma non terminale). Erede dello store `fm_branch_outcomes` di Firstmate.
+**Append-only** registry `~/.pi/fleet/branch-outcomes.jsonl`: one JSON line per **terminal transition** of a task (`done`/`failed`/`aborted`) and for each `needs_input` event (relevant but not terminal). Heir of Firstmate's `fm_branch_outcomes` store.
 
-Formato riga (una riga = un JSON, `\n` terminato):
+Line format (one line = one JSON, `\n` terminated):
 
 ```json
 {"ts": 1724800000000, "taskId": "...", "title": "...", "project": "...", "verdict": "done|failed|aborted|needs_input", "summary": "...", "changedFiles": ["..."], "reportPath": null, "groupId": "grp-..." }
 ```
 
-- **Scrittura**: `extensions/fleet-outcomes.ts` (`appendOutcome`), hook in `extensions/index.ts` — ramo transizione terminale del watcher (3s poll), `reconcileStaleTasks` (zombie → done/failed/aborted) e `fleet_abort` (aborted via tool). Best-effort e con **dedup in-process** (chiave `taskId+verdict+doneAt`): la stessa transizione non viene mai scritta due volte e non rompe mai il wake.
-- **Query**: tool `fleet_outcomes` (filtri `limit` default 20, `project` match parziale, `verdict`, `raw` per il JSONL grezzo; `details.count`/`details.file`), oppure `queryOutcomes()` nel modulo.
-- **Note**: append-only — non si modifica mai retroattivamente; righe corrotte vengono ignorate in lettura.
+- **Writing**: `extensions/fleet-outcomes.ts` (`appendOutcome`), hook in `extensions/index.ts` — watcher terminal-transition branch (3s poll), `reconcileStaleTasks` (zombie → done/failed/aborted) and `fleet_abort` (aborted via tool). Best-effort and with **in-process dedup** (key `taskId+verdict+doneAt`): the same transition is never written twice and never breaks the wake.
+- **Query**: tool `fleet_outcomes` (filters `limit` default 20, `project` partial match, `verdict`, `raw` for the raw JSONL; `details.count`/`details.file`), or `queryOutcomes()` in the module.
+- **Notes**: append-only — never modified retroactively; corrupted lines are ignored on read.
 
-### Gruppi di task (L3.5)
+### Task groups (L3.5)
 
-Lancia N task nello stesso messaggio → formano automaticamente un gruppo.
-Vedrai un unico digest verboso quando tutti hanno finito. `needs_input` sveglia subito.
-`fleet_status` mostra `grp:xxx 2/3`; `fleet_status(groupId: <id>)` filtra per gruppo (groupId completo o prefisso 8).
+Launch N tasks in the same message → they automatically form a group.
+You will see a single verbose digest when all have finished. `needs_input` wakes right away.
+`fleet_status` shows `grp:xxx 2/3`; `fleet_status(groupId: <id>)` filters by group (full groupId or 8-char prefix).
 
-Dettaglio: `groupId`/`groupSize`/`groupLabel`/`groupMode` in `{id}.json`; stato gruppo persistito in `~/.pi/fleet/.wake-groups/{groupId}.json` per recovery dopo restart Pi. `fleet_status` raggruppa per `groupId` e mostra `Gruppo <id> (label) — 2/3 completi:` + `Singoli:`.
+Detail: `groupId`/`groupSize`/`groupLabel`/`groupMode` in `{id}.json`; group state persisted in `~/.pi/fleet/.wake-groups/{groupId}.json` for recovery after a Pi restart. `fleet_status` groups by `groupId` and shows `Group <id> (label) — 2/3 complete:` + `Singles:`.
 
-**`groupFailPolicy`** (opzionale, default `waitAll`): controlla cosa succede quando un task di un gruppo barrier **fallisce**.
+**`groupFailPolicy`** (optional, default `waitAll`): controls what happens when a task of a barrier group **fails**.
 
-- `waitAll` (default): comportamento attuale — il failed viene bufferizzato, si attende il digest di gruppo quando gli altri task finiscono.
-- `immediate`: il task fallito **sveglia subito** il capitano con il contesto del gruppo (quanti done, quanti pending) invece di aspettare il digest. Gli altri task del gruppo continuano e il gruppo resta pending (il digest finale arriva comunque quando gli altri finiscono).
+- `waitAll` (default): current behavior — the failed task is buffered, the group digest is awaited when the other tasks finish.
+- `immediate`: the failed task **wakes the captain right away** with the group context (how many done, how many pending) instead of waiting for the digest. The other group tasks continue and the group stays pending (the final digest still arrives when the others finish).
 
-Usa `immediate` per fail-fast: quando un errore rende inutili gli altri task del gruppo (es. una build che fallisce e invalida gli step successivi). Il campo va passato a `fleet_launch` (`groupFailPolicy`) e finisce in `{id}.json`; il flag CLI è `--group-fail-policy`.
+Use `immediate` for fail-fast: when an error makes the other group tasks useless (e.g. a build that fails and invalidates the subsequent steps). The field goes to `fleet_launch` (`groupFailPolicy`) and ends up in `{id}.json`; the CLI flag is `--group-fail-policy`.
 
-> Nota: la policy riguarda SOLO i `failed`. I `done`/`aborted` restano `waitAll` (bufferizzati) anche con `immediate`; `needs_input` continua a rompere il barrier e svegliare subito in entrambi i casi.
+> Note: the policy concerns ONLY `failed`. The `done`/`aborted` stay `waitAll` (buffered) even with `immediate`; `needs_input` keeps breaking the barrier and waking immediately in both cases.
 
 ### Bootstrap
 
@@ -367,38 +367,38 @@ Implementation: `extensions/fleet-bootstrap.ts` (lazy-loaded, fail-soft — same
 
 ## Testing
 
-Smoke test end-to-end della catena base **launcher → pi figlio nel pane herdr → done-marker → stato su disco**:
+End-to-end smoke test of the base chain **launcher → pi child in the herdr pane → done-marker → state on disk**:
 
 ```bash
 bash tests/smoke.sh
 ```
 
-Prerequisiti:
-- **herdr attivo** con la sessione `default` (o imposta `HERDR_SESSION` per un'altra sessione) — se il daemon non risponde lo script esce con codice `2` (skipped documentato, mai falso verde);
+Prerequisites:
+- **active herdr** with the `default` session (or set `HERDR_SESSION` for another session) — if the daemon does not respond the script exits with code `2` (documented skip, never a false green);
 - `jq` in PATH (`brew install jq`);
-- `pi` raggiungibile come agente herdr (il figlio gira in un pane reale).
+- `pi` reachable as a herdr agent (the child runs in a real pane).
 
-Cosa fa: crea un repo scratch in `/tmp/fleet-smoke-*` (git init + commit iniziale), isola lo stato in `/tmp/fleet-smoke-state-*` via `FLEET_STATE_HOME` (la flotta reale in `~/.pi/fleet` **non viene toccata**), lancia `bin/herdr-launch.sh` con `--no-worktree` su un task figlio minimo e verifica: state json con `state == "done"` e `summary` non vuota, `esito.txt` contenente `SMOKE_OK` nel repo scratch, done-marker consumato dal launcher.
+What it does: creates a scratch repo in `/tmp/fleet-smoke-*` (git init + initial commit), isolates the state in `/tmp/fleet-smoke-state-*` via `FLEET_STATE_HOME` (the real fleet in `~/.pi/fleet` **is not touched**), launches `bin/herdr-launch.sh` with `--no-worktree` on a minimal child task and verifies: state json with `state == "done"` and non-empty `summary`, `esito.txt` containing `SMOKE_OK` in the scratch repo, done-marker consumed by the launcher.
 
-Exit codes: `0` verde · `1` fallito · `2` prerequisiti mancanti.
+Exit codes: `0` green · `1` failed · `2` missing prerequisites.
 
-Dalla stessa run, lo smoke copre anche **due scenari gate** su repo scratch dedicati (`/tmp/fleet-gate-{a,b}-*`, `gate.yaml` con `autoPr:false`, nessun remote):
+In the same run, the smoke also covers **two gate scenarios** on dedicated scratch repos (`/tmp/fleet-gate-{a,b}-*`, `gate.yaml` with `autoPr:false`, no remote):
 
-| Caso | Setup | Esito atteso |
+| Case | Setup | Expected outcome |
 |---|---|---|
-| **A** | `gate-test.sh` rotto (exit 1), brief che proibisce di fixare | task `failed`, `gate.passed=false`, `gate/report.json` con `overall: red`, **nessuna PR** |
-| **B** | `gate-test.sh` verde (exit 0) | task `done`, `gate.passed=true`, report `overall: green`, **nessuna PR** (`autoPr` false) |
+| **A** | broken `gate-test.sh` (exit 1), brief forbidding the fix | task `failed`, `gate.passed=false`, `gate/report.json` with `overall: red`, **no PR** |
+| **B** | green `gate-test.sh` (exit 0) | task `done`, `gate.passed=true`, report `overall: green`, **no PR** (`autoPr` false) |
 
-**PR automatica vera** (remote GitHub reale + `gh-axi pr create`): fuori dallo smoke automatico — procedura manuale/run separato: crea un repo con remote, `gate.yaml` con `autoPr: true`, lancia un task no-mistakes e verifica in `fleet_status` il suffisso `(pr:#N)` e lo stato con `prUrl`; il merge resta manuale (autorità = capitano).
+**Real automatic PR** (real GitHub remote + `gh-axi pr create`): outside the automatic smoke — manual procedure/separate run: create a repo with a remote, `gate.yaml` with `autoPr: true`, launch a no-mistakes task and check in `fleet_status` the `(pr:#N)` suffix and the state with `prUrl`; the merge stays manual (authority = captain).
 
-Environment opzionali:
+Optional environment:
 
-| Variabile | Effetto |
+| Variable | Effect |
 |---|---|
-| `PI_FLEET_SMOKE_MODEL` | override del modello del figlio, full id `provider/id` (default: catena env del launcher, es. `PI_PROVIDER`/`PI_MODEL`) |
-| `SMOKE_TIMEOUT_S` | timeout esterno del launcher in secondi (default `480`) |
-| `SMOKE_KEEP=1` | non rimuovere scratch/state a fine run (debug) |
-| `HERDR_SESSION` | sessione herdr da usare (default `default`) |
+| `PI_FLEET_SMOKE_MODEL` | child model override, full id `provider/id` (default: launcher env chain, e.g. `PI_PROVIDER`/`PI_MODEL`) |
+| `SMOKE_TIMEOUT_S` | external launcher timeout in seconds (default `480`) |
+| `SMOKE_KEEP=1` | do not remove scratch/state at the end of the run (debug) |
+| `HERDR_SESSION` | herdr session to use (default `default`) |
 
 ---
 
