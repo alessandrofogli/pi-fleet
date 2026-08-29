@@ -452,8 +452,8 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     name: "fleet_launch",
     label: "Fleet Launch",
     description:
-      "Spawna un sub-agent VISIBILE: crea un pane herdr affiancato (split nel tab corrente) con pi dentro (stesso modello della sessione main), in una worktree treehouse isolata, gli consegna il brief e libera la chat. A fine task il report arriva nella chat (successo senza interruzione; failed/needs_input risvegliano il main agent nel turno).",
-    promptSnippet: "Spawn a visible herdr side-pane sub-agent for a delegation task",
+      "Spawna un sub-agent VISIBILE: lo esegue in un workspace herdr 'fleet' dedicato (tab --no-focus) con pi dentro (stesso modello della sessione main), in una worktree treehouse isolata, gli consegna il brief e libera la chat. Il figlio NON ruba il focus e NON occupa spazio nel tab del capitano: è visibile SOLO nella sidebar agents di herdr a sinistra (fino a che non lo apri). A fine task il report arriva nella chat (successo senza interruzione; failed/needs_input risvegliano il main agent nel turno).",
+    promptSnippet: "Spawn a background herdr sub-agent (agents-sidebar only) for a delegation task",
     promptGuidelines: [
       "AUTOMATICALLY call fleet_launch for ANY non-trivial request about a project: reading/analyzing, editing, implementing, fixing, testing, refactoring. Do NOT wait for the user to type fleet_launch and do NOT ask for confirmation — delegation is the default. Handle inline ONLY questions answerable from context, fleet management, and trivial one-liners.",
       "project is REQUIRED (absolute path, ~/path, or short name if FLEET_PROJECTS_DIR is set): derive it from the user's message or the last task's project; ask one short question only if truly ambiguous. Never launch without project. Keep worktree enabled.",
@@ -719,9 +719,8 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       let state = "not_found";
       if (task) {
         writeFileSync(join(STATE_HOME, `${task.id}.abort`), `${Date.now()}\n`);
-        // Pane laterale o tab dedicato: chiudi entrambi quando presenti,
-        // tollerando fallimenti (il pane split non ha tab dedicato → solo pane;
-        // task legacy con tab dedicato → pane + tab vuoto).
+        // Tab dedicato nel workspace fleet (oppure pane split di task legacy):
+        // chiudi entrambi quando presenti, tollerando fallimenti.
         if (task.paneId) await runHerdr(["pane", "close", task.paneId], 10_000);
         if (task.tabId) await runHerdr(["tab", "close", task.tabId], 10_000);
         if (task.state === "running" || task.state === "needs_input" || task.state === "spawning") {

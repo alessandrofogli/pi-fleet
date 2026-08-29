@@ -109,8 +109,9 @@ else
 fi
 
 # ------------------------------------------------------- 1. workspace herdr ----
-# La workspace serve SOLO al fallback `tab create` (step 4): il flusso primario
-# (pane split) nasce nel tab corrente del chiamante e non risolve/crea workspace.
+# Il figlio gira in una workspace "fleet" DEDICATA per progetto: non tocca MAI il
+# workspace/tab del capitano. Da qui è visibile SOLO nella sidebar agents di herdr
+# a sinistra (stato roll-up per workspace) e non occupa spazio nel tab della chat.
 # Slug leggibile dal titolo (fallback quando --task-id non è passato).
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//' | cut -c1-30 | sed 's/-$//'
@@ -124,24 +125,29 @@ TAB_ID=""
 AGENT_NAME="f-$(printf '%s' "$(slugify "$TITLE")" | cut -c1-23)-$(printf '%04d' $((RANDOM % 10000)))"
 log "task: $TASK_ID — $TITLE"
 
-resolve_workspace() {
-  # Usa la workspace del pane pi che lavora sul progetto, altrimenti la
-  # workspace focalizzata, altrimenti crea una workspace "fleet".
-  local agents ws
-  if [[ -n "${HERDR_WORKSPACE_ID:-}" ]]; then
-    echo "$HERDR_WORKSPACE_ID"; return 0
-  fi
-  agents="$(herdr_cli agent list)" || true
-  if [[ -n "$agents" ]]; then
-    ws="$(printf '%s' "$agents" | jq -r --arg cwd "$PROJECT" \
-      '[.result.agents[] | select((.agent=="pi") or (.agent|startswith("fleet-")))] | sort_by((.cwd==$cwd)|not) | .[0].workspace_id // empty' 2>/dev/null)" \
-      || ws=""
-    [[ -n "$ws" ]] && { echo "$ws"; return 0; }
-  fi
-  ws="$(herdr_cli workspace list | jq -r '[.result.workspaces[] | select(.focused==true)] | .[0].workspace_id // empty')" 2>/dev/null
+resolve_fleet_workspace() {
+  # Workspace "fleet" DEDICATA per progetto: i figli girano qui, MAI nel
+  # workspace/tab del capitano → visibili SOLO nella sidebar agents di herdr
+  # (roll-up per workspace). Idempotente e tollerante alle race dei lanci in
+  # parallelo: prima cerca (label+"cwd"), poi crea, e se la creazione fallisce
+  # (label/cwd già presa da un altro launcher) rielenca.
+  local ws_out ws
+  ws_out="$(herdr_cli workspace list)" || ws_out=""
+  ws="$(printf '%s' "$ws_out" | jq -r --arg l "fleet" --arg c "$PROJECT" \
+    '[.result.workspaces[]? | select((.label==$l) and ((.cwd // "")==$c))] | .[0].workspace_id // empty' 2>/dev/null)" \
+    || ws=""
   [[ -n "$ws" ]] && { echo "$ws"; return 0; }
-  log "nessuna workspace trovata: creo workspace 'fleet'"
-  herdr_cli workspace create --label "fleet" --cwd "$PROJECT" | jq -r '.result.workspace_id // empty'
+  for ((try = 1; try <= 3; try++)); do
+    ws="$(herdr_cli workspace create --label "fleet" --cwd "$PROJECT" --no-focus \
+      | jq -r '.result.workspace_id // empty' 2>/dev/null)" || ws=""
+    [[ -n "$ws" ]] && { log "workspace fleet creata: $ws"; echo "$ws"; return 0; }
+    sleep 1
+    ws_out="$(herdr_cli workspace list)" || continue
+    ws="$(printf '%s' "$ws_out" | jq -r --arg l "fleet" --arg c "$PROJECT" \
+      '[.result.workspaces[]? | select((.label==$l) and ((.cwd // "")==$c))] | .[0].workspace_id // empty' 2>/dev/null)" || ws=""
+    [[ -n "$ws" ]] && { echo "$ws"; return 0; }
+  done
+  echo ""
 }
 
 
@@ -227,51 +233,31 @@ mv "$STATE_JSON.tmp" "$STATE_JSON"  # atomico: niente letture a metà da parte d
 log "stato: $STATE_JSON"
 if [[ -n "${GROUP_ID:-}" ]]; then log "gruppo: $GROUP_ID ($GROUP_MODE)"; fi
 
-# ------------------------------------------------------- 4. pane herdr ----
-# Flusso primario: pane LATERALE (split) nel tab corrente del chiamante
-# (raccomandazione guida herdr: "Default to a sibling pane in the current tab").
-# Il pane nasce già nel tab del chiamante: niente risoluzione/creazione workspace,
-# e tabId resta VUOTO — non esiste un tab dedicato da chiudere, l'abort/cleanup
-# chiude SOLO il pane (mai il tab del chiamante, che contiene il capitano).
-# Fallback al vecchio `tab create` se HERDR_ENV != 1 o se lo split fallisce
-# (es. esecuzione manuale da shell fuori da herdr).
+# ------------------------------------------------------- 4. tab herdr (sidebar-only) ----
+# I figli girano nel workspace "fleet" dedicato (mai nel tab del capitano) in un
+# tab `--no-focus`: non rubano il focus, NON occupano spazio nel tab della chat e
+# NON appaiono nella tab bar del capitano — sono visibili SOLO nella sidebar
+# agents di herdr a sinistra (stato roll-up per workspace) finché non li si apre.
+# close_tab chiude tab + pane (il tab del workspace fleet è dedicato al task;
+# il tab del capitano non viene MAI toccato).
 close_tab() {
-  if [[ -n "$PANE_ID" ]]; then
-    herdr_cli pane close "$PANE_ID" >/dev/null 2>&1 && log "pane chiuso" || log "pane già chiuso"
-    PANE_ID=""
-  fi
   if [[ -n "$TAB_ID" ]]; then
     herdr_cli tab close "$TAB_ID" >/dev/null 2>&1 && log "tab chiuso" || log "tab già chiuso"
     TAB_ID=""
   fi
-}
-SPLIT_OK=""
-if [[ "${HERDR_ENV:-0}" == "1" ]]; then
-  SPLIT_OUT="$(herdr_cli pane split --current --direction right --cwd "$TASK_CWD" --no-focus)"
-  PANE_ID="$(printf '%s' "$SPLIT_OUT" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)"
   if [[ -n "$PANE_ID" ]]; then
-    # workspace = quella del pane creato (o HERDR_WORKSPACE_ID come fallback);
-    # tabId resta vuoto: il pane vive nel tab del chiamante (HERDR_TAB_ID).
-    WORKSPACE="$(printf '%s' "$SPLIT_OUT" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)"
-    [[ -z "$WORKSPACE" ]] && WORKSPACE="${HERDR_WORKSPACE_ID:-}"
-    log "pane laterale: $PANE_ID (workspace ${WORKSPACE:-?}, tab chiamante ${HERDR_TAB_ID:-?})"
-    SPLIT_OK=1
-  else
-    log "warning: pane split fallito (${SPLIT_OUT:0:160}); fallback: tab create"
+    herdr_cli pane close "$PANE_ID" >/dev/null 2>&1 && log "pane chiuso" || log "pane già chiuso"
+    PANE_ID=""
   fi
-fi
-if [[ -z "$SPLIT_OK" ]]; then
-  if [[ -z "${WORKSPACE:-}" ]]; then
-    WORKSPACE="$(resolve_workspace)"
-    [[ -z "$WORKSPACE" ]] && { herr "impossibile risolvere la workspace herdr"; fail_task "workspace herdr non risolvibile"; release_worktree; exit 1; }
-    log "workspace: $WORKSPACE"
-  fi
-  TB_OUT="$(herdr_cli tab create --workspace "$WORKSPACE" --cwd "$TASK_CWD" --label "$TASK_ID" --no-focus)"
-  TAB_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)"
-  PANE_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)"
-  [[ -z "$TAB_ID" || -z "$PANE_ID" ]] && { herr "tab create senza tab/pane id: $TB_OUT"; fail_task "tab create fallito: $TB_OUT"; release_worktree; exit 1; }
-  log "fallback tab create: tab: $TAB_ID | pane: $PANE_ID"
-fi
+}
+WORKSPACE="$(resolve_fleet_workspace)"
+[[ -z "$WORKSPACE" ]] && { herr "impossibile creare/risolvere la workspace fleet"; fail_task "workspace fleet non risolvibile"; release_worktree; exit 1; }
+log "workspace fleet: $WORKSPACE"
+TB_OUT="$(herdr_cli tab create --workspace "$WORKSPACE" --cwd "$TASK_CWD" --label "$TASK_ID" --no-focus)"
+TAB_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)"
+PANE_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)"
+[[ -z "$TAB_ID" || -z "$PANE_ID" ]] && { herr "tab create senza tab/pane id: $TB_OUT"; fail_task "tab create fallito: $TB_OUT"; release_worktree; exit 1; }
+log "tab fleet (solo sidebar): $TAB_ID | pane: $PANE_ID"
 add_pane_ids
 
 # Cleanup su errore: SEMPRE pane/tab prima di treehouse return (return uccide i

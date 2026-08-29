@@ -5,7 +5,7 @@
 | Level | Name | What it does | Wake | Token cost | Status |
 |---|---|---|---|---|---|
 | **L1** | Baseline | pi-subagents install, 6h timeout, FleetView | in-process (pi-subagents) | 0 extra | done |
-| **L2** | Herdr-pane launcher | Visible herdr side panes (split in caller's tab) + worktree per task + in-process watcher | in-process watcher (3s poll) | 0 extra | done (M1+M2+M3+M4) |
+| **L2** | Herdr-pane launcher | Background children in a dedicated fleet workspace (visible only in the agents sidebar) + worktree per task + in-process watcher | in-process watcher (3s poll) | 0 extra | done (M1+M2+M3+M4) |
 | **L3** | Watcher esterno | Wake **even when Pi is closed** — zero-token, restart-proof | external bash loop + durable queue | 0 (model runs only on actionable) | this milestone |
 
 L2 already covers laptop suspend (freeze → resume). L3 exists only for **Pi really closed** or multi-harness.
@@ -223,7 +223,7 @@ Batch di N task lanciati nello stesso messaggio → stesso `groupId`, unico dige
   "doneAt": null,
   "timeoutMs": 21600000,
   "paneId": "pane-uuid",
-  "tabId": "",            // split: nessun tab dedicato (fallback tab create: "tab-uuid")
+  "tabId": "tab-uuid",     // tab dedicato nel workspace fleet (mai vuoto; mai il tab del capitano)
   "workspaceId": "ws-uuid",
   "summary": "…",
   "changedFiles": ["src/auth.ts"]
@@ -263,5 +263,5 @@ Simplifications are intentional: pi-fleet L3 is the **zero-token wake for Pi-clo
 
 See `README.md` Architecture section for M1 (launcher) + M2 (extension watcher/reconcile/captain gate/active model). This document focuses on L3, but the full picture is:
 
-- **M1**: `bin/herdr-launch.sh` — `pane split --current --direction right --no-focus` (fallback `tab create` fuori da herdr), `treehouse get --lease --no-fetch`, `agent start --model <provider/id>` (sempre full id, mai bare; unique `f-<slug>-<rand>` name), brief delivery, marker wait with liveness-check (15s) + abort marker.
+- **M1**: `bin/herdr-launch.sh` — workspace fleet dedicata (`workspace list` label "fleet"+cwd, else `workspace create --label fleet --cwd <project> --no-focus`, race-safe), `tab create --workspace <fleet> --cwd <worktree> --no-focus` (visible SOLO nella sidebar agents; mai nel tab del capitano), `treehouse get --lease --no-fetch`, `agent start --model <provider/id>` (sempre full id, mai bare; unique `f-<slug>-<rand>` name), brief delivery, marker wait with liveness-check (15s) + abort marker.
 - **M2**: `extensions/index.ts` — 6 tools (`fleet_launch/status/peek/steer/abort/attach`), detached double-fork launcher, 3s poll watcher (`done` followUp no triggerTurn, `failed/needs_input` triggerTurn), seeding, reconcile (pane dead → done/failed/aborted), captain gate, active model `ctx.model` composto come `provider/id` (mai bare id, fallback `PI_PROVIDER`/`PI_DEFAULT_MODEL`).

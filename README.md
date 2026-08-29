@@ -1,10 +1,10 @@
 # pi-fleet
 
-Visible sub-agents for [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`): delegate a task, a **real herdr side pane** (split in your current tab, next to your workspace) opens with a child `pi` working in an **isolated treehouse worktree**, the main chat stays free, and the result lands back in the chat — waking you only when the captain is actually needed (failure or input required).
+Visible sub-agents for [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`): delegate a task and a child `pi` starts in a **dedicated herdr "fleet" workspace** (background tab, `--no-focus`), working in an **isolated treehouse worktree**. The child never steals focus and never occupies space in your tab: it appears **only in the herdr agents sidebar (left)**, whose state rolls up per workspace. The main chat stays free, and the result lands back in the chat — waking you only when the captain is actually needed (failure or input required).
 
 A [Firstmate](https://github.com/kunchenguid/firstmate)-like experience inside pi, without external agents.
 
-> **Inspired by [Firstmate](https://github.com/kunchenguid/firstmate)** — the original fleet orchestrator for pi. pi-fleet brings the same visible-side-pane + isolated-worktree + captain-only wake pattern natively into pi.
+> **Inspired by [Firstmate](https://github.com/kunchenguid/firstmate)** — the original fleet orchestrator for pi. pi-fleet brings the same background-sidebar + isolated-worktree + captain-only wake pattern natively into pi.
 
 ---
 
@@ -17,7 +17,7 @@ A [Firstmate](https://github.com/kunchenguid/firstmate)-like experience inside p
                        pi-fleet (extension)
                                   │  spawns (detached)
                                   ▼  bin/herdr-launch.sh
-                       VISIBLE herdr side pane (split: w1:t1:p2) + child pi + treehouse worktree
+                       background fleet workspace (sidebar agents only) + child pi + treehouse worktree
                                   │  waits on markers in ~/.pi/fleet/<id>.json
                                   │  done → summary in state
                                   ▼
@@ -106,7 +106,7 @@ The extension loads only at startup. Then try:
 look at my-project and give me a README summary
 ```
 
-The task opens as a visible herdr side pane (split next to yours); when it finishes the report lands in the chat.
+The task starts in the dedicated **fleet workspace** (sidebar agents only, never focused into your view); when it finishes the report lands in the chat.
 
 ---
 
@@ -146,7 +146,7 @@ With `~/.pi/AGENTS.md` installed, pi **calls `fleet_launch` on its own** for any
 do a deep check of the LLM models in my-app? and in parallel check the database setup
 ```
 
-- Parallel tasks → up to 5 per turn, in separate side panes, different worktrees
+- Parallel tasks → up to 5 per turn, in separate fleet tabs (sidebar only), different worktrees
 - Main **closes the turn immediately** after launching (no polling)
 - Reports land on their own in the chat; `failed`/`needs_input` actually wake you
 
@@ -181,11 +181,11 @@ Dettaglio: `groupId`/`groupSize`/`groupLabel`/`groupMode` in `{id}.json`; stato 
 
 ### M1 — `bin/herdr-launch.sh` (launcher)
 
-- Resolves herdr workspace (herdr CLI, not env), takes a **worktree** with `treehouse get --lease --no-fetch`
-- Creates the **side pane** (`pane split --current --direction right --no-focus` in the caller's tab; fallback `tab create` outside herdr), starts the **child pi** (`agent start <unique-name> --kind pi --model <provider/model>` — agent name 1–32 chars, unique per task; always full `provider/id`, never a bare id)
+- Resolves/creates the dedicated **fleet workspace** (`workspace list` → label "fleet" + cwd match, else `workspace create --label fleet --cwd <project> --no-focus`; race-safe for parallel launches), takes a **worktree** with `treehouse get --lease --no-fetch`
+- Creates the child **tab in the fleet workspace** (`tab create --workspace <fleet> --cwd <worktree> --label <task-id> --no-focus`) → visible **only in the herdr agents sidebar** (never in the captain's tab or tab bar), starts the **child pi** (`agent start <unique-name> --kind pi --model <provider/model>` — agent name 1–32 chars, unique per task; always full `provider/id`, never a bare id)
 - Delivers the **brief** (rules: cwd, detached HEAD → create a branch `fleet/<id>-<slug>` before committing, done-marker JSON, full markdown summary)
 - Waits on markers with: **retry** on `agent_pane_busy` (4×3s), **liveness-check** every 15s (child dead without marker → `failed` in ~30s), configurable timeout, abort via marker
-- On finish writes state+summary, closes the pane (the dedicated tab only in fallback), **releases worktree** (order matters: `treehouse return` kills pane processes)
+- On finish writes state+summary, closes the pane/tab (dedicated to the task), **releases worktree** (order matters: `treehouse return` kills pane processes)
 
 ### M2 — `extensions/index.ts` (pi extension)
 
@@ -220,7 +220,7 @@ See `docs/ARCHITECTURE.md` for the full L3 flow, state layout, and differences f
 |---|---|
 | `agent start` with `invalid_agent_name` | agent name > 32 chars or not lowercase → launcher now generates `f-<slug max23>-<4digits>`, always valid |
 | Two parallel tasks, second won't start (`agent_name_taken`) | old duplicate `pi` names → fixed with unique names per task |
-| `agent_pane_busy` | transient race right after pane split / tab create → launcher retries 4×3s |
+| `agent_pane_busy` | transient race right after tab create → launcher retries 4×3s |
 | Task stuck `spawning`, pane never created | premature launcher exit without state mark → every exit now calls `fail_task` (state `failed` with reason) |
 | Phantom wake at startup | already-finished tasks from previous sessions → seeding + reconcile |
 | `fleet_notice` inside a still-running subagent | extension also active in children → captain gate (`cwd=HOME`) |
