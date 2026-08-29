@@ -31,6 +31,7 @@ MODEL_OVERRIDE=""
 GROUP_ID=""
 GROUP_LABEL=""
 GROUP_MODE="barrier"
+GROUP_FAIL_POLICY="waitAll"
 TITLE=""
 BRIEF=""
 
@@ -45,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --group-id) GROUP_ID="$2"; shift 2 ;;
     --group-label) GROUP_LABEL="$2"; shift 2 ;;
     --group-mode) GROUP_MODE="$2"; shift 2 ;;
+    --group-fail-policy) GROUP_FAIL_POLICY="$2"; shift 2 ;;
     --debug) FM_DEBUG=1; shift ;;
     -h|--help) sed -n '1,24p' "$0"; exit 0 ;;
     *)
@@ -230,7 +232,8 @@ cat > "$STATE_JSON.tmp" <<EOF
   "groupId": $(jq -Rn --arg v "$EFFECTIVE_GROUP_ID" '$v'),
   "groupSize": 1,
   "groupLabel": $(jq -Rn --arg v "${GROUP_LABEL:-}" '$v'),
-  "groupMode": "${GROUP_MODE:-barrier}"
+  "groupMode": "${GROUP_MODE:-barrier}",
+  "groupFailPolicy": "${GROUP_FAIL_POLICY:-waitAll}"
 }
 EOF
 mv "$STATE_JSON.tmp" "$STATE_JSON"  # atomico: niente letture a metà da parte del watcher
