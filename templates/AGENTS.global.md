@@ -38,3 +38,8 @@ Only if the request falls into one of these cases:
 - Each task runs in an isolated treehouse worktree; never work on the shared working tree for parallel tasks.
 - Success = report in chat without LLM interruption; failed/needs_input = wake with triggerTurn. No wake for voluntary abort.
 - Only `pi` tabs (no claude/codex).
+
+## Skill creation — placement (pi-fleet workflow)
+- Skills that serve OUR workflow in pi (agent + pi-fleet: brief, dispatch, task execution, etc.) must ALWAYS be created INSIDE the pi-fleet repo (`skills/<name>/SKILL.md`): shipped with the extension, auto-loaded by pi, versioned. Never create them globally.
+- Global (`~/.agents/skills/`) ONLY for generic skills NOT tied to our pi-fleet workflow (e.g. i-have-adhd, grilling, caveman...).
+- After adding a skill to the repo, remove any temporary local copy (single source of truth = repo).
