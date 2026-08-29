@@ -125,6 +125,12 @@ interface TaskStateFile {
   // T-011 mechanical gate: outcome of the launcher's anti-fraud verification
   gate?: { passed: boolean; rounds?: number; reportPath?: string };
   prUrl?: string;
+  // T-013 nested launch: the task opted in (nested:true → fleet tools enabled in
+  // its child session), its own depth (parent depth + 1; captain-launched = 1) and
+  // the task id that launched it (absent for captain-launched tasks).
+  nested?: boolean;
+  depth?: number;
+  parentTaskId?: string;
 }
 
 function stateDir(): string {
@@ -267,6 +273,11 @@ interface FleetLaunchParams {
   // T-011 gate: active only when posture is no-mistakes AND gate.yaml exists in the project
   gate?: boolean;
   autoPr?: boolean;
+  // T-013 nested launch: opt-in that enables the fleet_* tools in the child
+  // session; the child's depth and parent link are resolved in execute().
+  nested?: boolean;
+  depth?: number;
+  parentTaskId?: string;
 }
 
 function spawnLauncher(taskId: string, title: string, briefPath: string, params: FleetLaunchParams): { ok: boolean; error?: string; logPath?: string } {
@@ -285,6 +296,10 @@ function spawnLauncher(taskId: string, title: string, briefPath: string, params:
   // T-003: task delivery posture (default no-mistakes, already resolved in execute)
   if (params.deliveryPosture) args.push("--delivery-posture", params.deliveryPosture);
   if (params.groupFailPolicy) args.push("--group-fail-policy", params.groupFailPolicy);
+  // T-013: nested opt-in flag, inherited depth +1, and the parent task id
+  if (params.nested === true) args.push("--nested");
+  if (params.depth !== undefined) args.push("--depth", String(params.depth));
+  if (params.parentTaskId) args.push("--parent-task-id", params.parentTaskId);
   // T-011: gate meccanico (solo no-mistakes + gate.yaml, risolto in execute) + autoPr da gate.yaml
   if (params.gate) args.push("--gate");
   if (params.gate && params.autoPr !== undefined) args.push("--auto-pr", params.autoPr ? "true" : "false");
@@ -427,8 +442,9 @@ function sendAttention(pi: ExtensionAPI, task: TaskStateFile, subject: string): 
  * pane no longer exists are zombies (restart, crash, pilot closed the tab).
  * If the done-marker exists → done, otherwise failed. Avoids phantom wakes.
  */
-async function reconcileStaleTasks(): Promise<void> {
-  const tasks = listTasks().filter((t) => ACTIVE_STATES.has(t.state));
+async function reconcileStaleTasks(scopeTaskId?: string): Promise<void> {
+  const all = scopeTaskId ? watchedTasks(scopeTaskId) : listTasks();
+  const tasks = all.filter((t) => ACTIVE_STATES.has(t.state));
   if (tasks.length === 0) return;
   const res = await runHerdr(["agent", "list"], 10_000);
   if (!res.ok) return;
@@ -469,21 +485,21 @@ void getFleetOutcomes().catch(() => {});
 const reRingInFlight = new Map<string, () => void>();
 void getFleetInbox().catch(() => {});
 
-function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => void {
+function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>, scopeTaskId?: string): () => void {
   // Seed: states ALREADY present at startup must not wake (no
   // phantom notifications for tasks finished before the watcher started).
-  for (const task of listTasks()) watch.set(task.id, task.state);
+  for (const task of watchedTasks(scopeTaskId)) watch.set(task.id, task.state);
   // L3.5: load groups from disk if the module is available (sync path)
   try {
     const mod = getFleetGroupSync();
     if (mod) {
-      const rebuilt = mod.rebuildGroupsFromDisk(STATE_HOME, listTasks());
+      const rebuilt = mod.rebuildGroupsFromDisk(STATE_HOME, watchedTasks(scopeTaskId));
       for (const [k, v] of rebuilt) groupMap.set(k, v);
     }
   } catch { /* fail soft */ }
 
   const timer = setInterval(() => {
-    for (const task of listTasks()) {
+    for (const task of watchedTasks(scopeTaskId)) {
       const prev = watch.get(task.id);
       const isTerminal = task.state === "failed" || task.state === "needs_input" || task.state === "done";
       if (prev !== task.state && isTerminal) {
@@ -496,7 +512,7 @@ function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => vo
         let realGroupSize = task.groupSize ?? 1;
         if (task.groupId) {
           try {
-            realGroupSize = listTasks().filter((t) => (t.groupId ?? "") === task.groupId).length;
+            realGroupSize = watchedTasks(scopeTaskId).filter((t) => (t.groupId ?? "") === task.groupId).length;
           } catch { /* fail soft */ }
         }
         if (realGroupSize < 1) realGroupSize = 1;
@@ -553,7 +569,7 @@ function startWatcher(pi: ExtensionAPI, watch: Map<string, TaskState>): () => vo
     try {
       const mod = getFleetInboxSync();
       if (mod) {
-        for (const task of listTasks()) {
+        for (const task of watchedTasks(scopeTaskId)) {
           if (task.state !== "running" && task.state !== "needs_input") continue;
           const pending = mod.listPending(STATE_HOME, task.id);
           const needsRing = pending.some(
@@ -615,12 +631,141 @@ interface BackgroundWorkProviderShape {
 // The "subagents" are not child processes: they are INDEPENDENT pi sessions in the
 // herdr pane, coordinated via the shared files in ~/.pi/fleet. They all load this
 // extension → the watcher/fleet_notice dispatch MUST only fire in the captain
-// (cwd = HOME, AGENTS.md policy). In children the extension stays mute: no
-// watcher, no reconcile, only the consultation tools.
+// (cwd = HOME, AGENTS.md policy) or in a nested-opt-in child (T-013).
+//
+// Session roles (T-013 nested launch):
+//   captain — cwd = HOME (or PI_FLEET_CAPTAIN=1): full tools + global watcher
+//             (every task, exactly as before the ticket: ZERO regressions).
+//   nested  — a fleet child launched with nested:true. FLEET_TASK_ID/FLEET_DEPTH
+//             are injected by the launcher (tab create --env) and this session's
+//             own state file carries nested:true → fleet_* tools enabled, watcher
+//             SCOPED to its own subtree (the tasks it launched, +1 depth each).
+//   mute    — fleet child launched WITHOUT nested:true (or unmapped session): the
+//             extension stays mute and the fleet tools are EXPLICITLY denied with
+//             a clear message (the "blocked" child — behavior unchanged for tasks
+//             launched without the opt-in: no regression).
 const IS_CAPTAIN: boolean =
   process.env.PI_FLEET_CHILD === "1"
     ? false
     : process.env.PI_FLEET_CAPTAIN === "1" || process.cwd() === homedir();
+
+/** Own fleet task id, injected by the launcher via `tab create --env FLEET_TASK_ID=...`. */
+const FLEET_TASK_ID: string = process.env.FLEET_TASK_ID ?? "";
+/** Own depth: captain = 0; a launched task = parent depth + 1 (launcher --depth). */
+const FLEET_DEPTH: number = Number.isFinite(Number(process.env.FLEET_DEPTH))
+  ? Math.max(0, Math.floor(Number(process.env.FLEET_DEPTH)))
+  : 0;
+
+/** The session's own task state (null for the captain or an unmapped child). */
+function ownFleetTask(): TaskStateFile | null {
+  if (!FLEET_TASK_ID || IS_CAPTAIN) return null;
+  return readTask(FLEET_TASK_ID);
+}
+
+type SessionRole = { kind: "captain" } | { kind: "nested"; taskId: string; depth: number } | { kind: "mute" };
+
+/** Resolves the session role from env + own task state (cheap, fail-soft on disk). */
+function sessionRole(): SessionRole {
+  if (IS_CAPTAIN) return { kind: "captain" };
+  if (!FLEET_TASK_ID) return { kind: "mute" };
+  const t = ownFleetTask();
+  if (t?.nested !== true) return { kind: "mute" };
+  return { kind: "nested", taskId: FLEET_TASK_ID, depth: FLEET_DEPTH };
+}
+
+/** True when `t` is `rootId` itself or a descendant of it (parentTaskId chain, cycle-guarded). */
+function taskInSubtree(t: TaskStateFile | null, rootId: string): boolean {
+  let cur: TaskStateFile | null = t;
+  const seen = new Set<string>();
+  while (cur) {
+    if (cur.id === rootId) return true;
+    if (seen.has(cur.id)) return false;
+    seen.add(cur.id);
+    if (!cur.parentTaskId) return false;
+    cur = readTask(cur.parentTaskId);
+  }
+  return false;
+}
+
+/** Tasks this session may act on: all (captain) / own subtree (nested child) / none (mute). */
+function scopedTasks(): TaskStateFile[] {
+  const all = listTasks();
+  const role = sessionRole();
+  if (role.kind === "captain") return all;
+  if (role.kind === "nested") return all.filter((t) => taskInSubtree(t, role.taskId));
+  return [];
+}
+
+/** Watcher horizon: global for the captain, own subtree for nested children. */
+function watchedTasks(scopeTaskId?: string): TaskStateFile[] {
+  if (!scopeTaskId) return listTasks();
+  return listTasks().filter((t) => taskInSubtree(t, scopeTaskId));
+}
+
+/**
+ * T-013 gate for the fleet_* tools: only the captain or a nested-opt-in child may
+ * use them. Non-nested children get an EXPLICIT denial (clear message) — this makes
+ * the historical implicit block truthful and stays regression-free (mute children
+ * never received wakes and could never orchestrate before T-013 either).
+ */
+function fleetToolsGate(): { ok: true } | { ok: false; message: string } {
+  if (IS_CAPTAIN) return { ok: true };
+  const t = ownFleetTask();
+  if (!t) {
+    return {
+      ok: false,
+      message: "fleet tools are disabled in this session (no fleet task identity: FLEET_TASK_ID missing). Only the captain (cwd=$HOME or PI_FLEET_CAPTAIN=1) or a task launched with nested:true can use fleet_* tools.",
+    };
+  }
+  if (t.nested !== true) {
+    return {
+      ok: false,
+      message: `fleet tools are disabled for task ${t.id}: it was launched WITHOUT nested:true. Only the captain or tasks launched with nested:true can use fleet_* tools (T-013 nested launch).`,
+    };
+  }
+  return { ok: true };
+}
+
+/** Captain-only gate for captain-memory / global-authority tools (bootstrap, learn, prefs, stow). */
+function captainOnlyGate(): { ok: true } | { ok: false; message: string } {
+  if (IS_CAPTAIN) return { ok: true };
+  return {
+    ok: false,
+    message: "this tool is captain-only (cwd=$HOME or PI_FLEET_CAPTAIN=1): nested children cannot touch the captain's memory/bootstrap state.",
+  };
+}
+
+/** Uniform denial response for the gated tools (details unknown: the normal result shape varies per tool). */
+function gateDenial(gate: { ok: false; message: string }, toolName: string): { content: { type: "text"; text: string }[]; details: unknown } {
+  return {
+    content: [{ type: "text", text: `${toolName}: ${gate.message}` }],
+    details: { blocked: true, reason: gate.message },
+  };
+}
+
+/** Uniform denial response for the target-scoped tools (details unknown, same reason). */
+function toolDenial(toolName: string, reason: string, extra?: Record<string, unknown>): { content: { type: "text"; text: string }[]; details: unknown } {
+  return {
+    content: [{ type: "text", text: `${toolName}: ${reason}` }],
+    details: { blocked: true, reason, ...extra },
+  };
+}
+
+/**
+ * T-013 target scoping for the task-target tools: the captain may manage any task;
+ * a nested child only the tasks in its own subtree. Returns a denial reason or null.
+ */
+function targetScopeDenial(id: string, t: TaskStateFile | null): string | null {
+  const gate = fleetToolsGate();
+  if (!gate.ok) return gate.message;
+  if (IS_CAPTAIN) return null;
+  const role = sessionRole();
+  if (role.kind !== "nested") return `task ${id} out of scope (unknown session role).`;
+  if (!t || !taskInSubtree(t, role.taskId)) {
+    return `task ${id} is outside this nested orchestrator's subtree: only tasks launched by this task (or deeper descendants) can be managed.`;
+  }
+  return null;
+}
 
 export default function piFleetExtension(pi: ExtensionAPI): void {
   stateDir();
@@ -653,11 +798,34 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       kind: Type.Optional(Type.Union([Type.Literal("ship"), Type.Literal("scout")], { description: "Task kind: ship (default) or scout (report only, no commit/PR)" })),
       deliveryPosture: Type.Optional(Type.String({ description: "Task delivery posture (no-mistakes|direct-PR|local-only|yolo). Default: from postures.json config or no-mistakes." })),
       groupFailPolicy: Type.Optional(Type.String({ description: "waitAll (default) | immediate: a failed group task wakes the captain immediately" })),
+      nested: Type.Optional(Type.Boolean({ description: "T-013 opt-in: launch the task as a NESTED orchestrator — the child session gets the fleet_* tools (fleet_launch/status/peek/steer/abort) and its watcher delivers fleet_notice + group digests for its own subtree. Depth is capped (postures.json $config.nestedMaxDepth, default 2): beyond the cap the launch is denied." })),
     }),
     // L3.5: if you launch N in parallel in the same turn, reuse the same groupId (auto-batch)
     // The guideline helps the model pass an explicit groupId if it wants separate groups.
 
     async execute(_toolCallId: string, params: FleetLaunchParams, _signal?: unknown, _onUpdate?: unknown, ctx?: { model?: { id?: string; provider?: string } }) {
+      // T-013 gate: captain or nested-opt-in child only (explicit denial otherwise)
+      const gate = fleetToolsGate();
+      if (!gate.ok) {
+        return {
+          content: [{ type: "text", text: `fleet_launch: ${gate.message}` }],
+          details: { taskId: "", state: "rejected", title: params.title, reason: gate.message },
+        };
+      }
+      // T-013 depth cap: a session at depth N can launch only while N < max
+      // (postures.json $config.nestedMaxDepth, default 2). The child inherits N+1.
+      const maxNestedDepth = (await getFleetPosture())?.getNestedMaxDepth() ?? 2;
+      const role = sessionRole();
+      const myDepth = role.kind === "nested" ? role.depth : 0;
+      if (myDepth >= maxNestedDepth) {
+        const msg = `nested depth limit reached: this session is at depth ${myDepth}, max is ${maxNestedDepth} (postures.json $config.nestedMaxDepth). It cannot launch further tasks — only the captain or nested:true tasks with depth < ${maxNestedDepth} can.`;
+        return {
+          content: [{ type: "text", text: `fleet_launch: ${msg}` }],
+          details: { taskId: "", state: "rejected", title: params.title, reason: msg },
+        };
+      }
+      const childDepth = myDepth + 1;
+      const parentTaskId = FLEET_TASK_ID || undefined;
       const resolved = resolveProject(params.project);
       if (!resolved.ok) {
         const details: { taskId: string; state: string; logPath?: string; title: string; reason?: string } = {
@@ -718,11 +886,19 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         kind: params.kind ?? "ship",
         deliveryPosture: posture,
         groupFailPolicy: params.groupFailPolicy,
+        // T-013: nested opt-in + inherited depth + parent link, persisted in the state
+        nested: params.nested === true,
+        depth: childDepth,
+        parentTaskId,
       };
       writeTask(task);
 
       const launchParams = { ...params, project, effectiveGroupId } as FleetLaunchParams & { effectiveGroupId?: string };
       launchParams.deliveryPosture = posture;
+      // T-013: propagate the nested opt-in + child depth + parent link to the launcher
+      launchParams.nested = params.nested === true;
+      launchParams.depth = childDepth;
+      launchParams.parentTaskId = parentTaskId;
       // T-011 mechanical gate: active ONLY when posture no-mistakes AND the project
       // has gate.yaml. Backward compatibility: other postures and projects without
       // gate.yaml change nothing. autoPr from gate.yaml (default false — NEVER open a PR without config).
@@ -786,7 +962,11 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       groupId: Type.Optional(Type.String({ description: "Filter by group (full groupId or 8-char prefix)" })),
     }),
     async execute(_toolCallId, params: { limit?: number; groupId?: string }) {
-      let allTasks = listTasks();
+      // T-013: only the captain or a nested-opt-in child may use the fleet tools;
+      // nested children see their own subtree (the tasks they launched).
+      const gate = fleetToolsGate();
+      if (!gate.ok) return gateDenial(gate, "fleet_status");
+      let allTasks = scopedTasks();
       // group filter if requested — matches groupId or id fallback for singles
       if (params.groupId) {
         const gid = params.groupId;
@@ -886,6 +1066,9 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       raw: Type.Optional(Type.Boolean({ description: "true → return the raw JSONL; default → readable text" })),
     }),
     async execute(_toolCallId, params: { limit?: number; project?: string; verdict?: "done" | "failed" | "aborted" | "needs_input"; raw?: boolean }) {
+      // T-013: only the captain or a nested-opt-in child may use the fleet tools
+      const gate = fleetToolsGate();
+      if (!gate.ok) return gateDenial(gate, "fleet_outcomes");
       const mod = getFleetOutcomesSync();
       if (!mod) {
         return {
@@ -894,11 +1077,23 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         };
       }
       const file = mod.outcomesFile(STATE_HOME);
-      const rows = mod.queryOutcomes(STATE_HOME, {
+      let rows = mod.queryOutcomes(STATE_HOME, {
         limit: params.limit ?? 20,
         project: params.project,
         verdict: params.verdict,
       });
+      // T-013: nested children only read the outcomes of their own subtree
+      const orole = sessionRole();
+      if (orole.kind === "nested") {
+        rows = rows.filter((line) => {
+          try {
+            const o = JSON.parse(line) as { taskId?: string };
+            return !!o.taskId && taskInSubtree(readTask(o.taskId), orole.taskId);
+          } catch {
+            return false;
+          }
+        });
+      }
       let text: string;
       if (params.raw) {
         text = rows.length ? rows.join("\n") : "(no entries in the branch-outcomes registry)";
@@ -936,6 +1131,10 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params: { id: string }) {
       const task = readTask(params.id);
+      const denied = targetScopeDenial(params.id, task);
+      if (denied) {
+        return toolDenial("fleet_peek", denied, { taskId: params.id });
+      }
       let output = "";
       let paneId = "";
       if (task?.paneId) {
@@ -962,6 +1161,10 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params: { id: string; message: string; replay?: boolean }) {
       const task = readTask(params.id);
+      const denied = targetScopeDenial(params.id, task);
+      if (denied) {
+        return toolDenial("fleet_steer", denied, { taskId: params.id, delivered: false });
+      }
       const replay = params.replay ?? true;
       let delivered = false;
       let note = "";
@@ -1035,6 +1238,9 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       posture: Type.Optional(Type.String({ description: "Delivery posture (no-mistakes|direct-PR|local-only|yolo). Only with action=set." })),
     }),
     async execute(_toolCallId: string, params: { action: "get" | "set"; project: string; posture?: string }) {
+      // T-013: only the captain or a nested-opt-in child may use the fleet tools
+      const gate = fleetToolsGate();
+      if (!gate.ok) return gateDenial(gate, "fleet_posture");
       type Details = { ok: boolean; action: "get" | "set"; project?: string; posture?: string; error?: string };
       let details: Details;
       let text: string;
@@ -1086,6 +1292,10 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params: { id: string }) {
       const task = readTask(params.id);
+      const denied = targetScopeDenial(params.id, task);
+      if (denied) {
+        return toolDenial("fleet_abort", denied, { taskId: params.id });
+      }
       let state = "not_found";
       if (task) {
         writeFileSync(join(STATE_HOME, `${task.id}.abort`), `${Date.now()}\n`);
@@ -1120,6 +1330,10 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params: { id: string }) {
       const task = readTask(params.id);
+      const denied = targetScopeDenial(params.id, task);
+      if (denied) {
+        return toolDenial("fleet_attach", denied, { taskId: params.id, focused: false });
+      }
       let focused = false;
       let note = "Task not found. Use fleet_status.";
       if (task) {
@@ -1141,6 +1355,9 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       verbose: Type.Optional(Type.Boolean({ description: "Include full tool-by-tool report and cleanup details (default: false)" })),
     }),
     async execute(_toolCallId: string, params: { verbose?: boolean }) {
+      // T-013: bootstrap touches global fleet state → captain-only
+      const gate = captainOnlyGate();
+      if (!gate.ok) return gateDenial(gate, "fleet_bootstrap");
       const mod = await getFleetBootstrap();
       let tools: CheckedTool[] = [];
       let cleanup: string[] = [];
@@ -1188,6 +1405,9 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       implication: Type.Optional(Type.String({ description: "Operational implication (optional)" })),
     }),
     async execute(_toolCallId, params: { title: string; fact: string; implication?: string }) {
+      // T-013: learnings are the captain's memory → captain-only
+      const gate = captainOnlyGate();
+      if (!gate.ok) return gateDenial(gate, "fleet_learn");
       const fl = await getFleetLearn();
       const details: {
         ok: boolean;
@@ -1227,6 +1447,9 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       shared: Type.Optional(Type.Boolean({ description: "true → captain-shared.md (shareable); default false → captain.md" })),
     }),
     async execute(_toolCallId, params: { action: "get" | "set"; key: string; value?: string; shared?: boolean }) {
+      // T-013: captain prefs are the captain's memory → captain-only
+      const gate = captainOnlyGate();
+      if (!gate.ok) return gateDenial(gate, "fleet_captain_pref");
       const fl = await getFleetLearn();
       const details: {
         ok: boolean;
@@ -1277,6 +1500,9 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       verbose: Type.Optional(Type.Boolean({ description: "true → extended detail" })),
     }),
     async execute(_toolCallId, params: { dryRun?: boolean; verbose?: boolean }) {
+      // T-013: stow prunes the captain's memory → captain-only
+      const gate = captainOnlyGate();
+      if (!gate.ok) return gateDenial(gate, "fleet_stow");
       const fl = await getFleetLearn();
       const details: {
         refreshed: number;
@@ -1363,7 +1589,13 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", () => {
-    if (!IS_CAPTAIN) return;
+    // T-013: the watcher runs for the captain (global, as before the ticket) and
+    // for nested-opt-in children (scoped to their own subtree); mute children stay
+    // silent. This is how a nested orchestrator receives the fleet_notice wakes
+    // and the group digests of its own grandchildren.
+    const role = sessionRole();
+    if (role.kind === "mute") return;
+    const scopeTaskId = role.kind === "nested" ? role.taskId : undefined;
     // L3.5: rebuild groups from disk (also needed for fallback if the external watcher mounts)
     void (async () => {
       try {
@@ -1391,7 +1623,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         } catch {}
       }
       if (externalAlive) {
-        void reconcileStaleTasks();
+        void reconcileStaleTasks(scopeTaskId);
         return;
       }
       console.warn("[pi-fleet] external watcher seems dead (no fresh beat/lock), starting in-process fallback watcher");
@@ -1399,8 +1631,8 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     generation++;
     stopWatcher?.();
     void (async () => {
-      await reconcileStaleTasks();
-      stopWatcher = startWatcher(pi, watch);
+      await reconcileStaleTasks(scopeTaskId);
+      stopWatcher = startWatcher(pi, watch, scopeTaskId);
     })();
   });
 
