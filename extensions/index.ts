@@ -97,6 +97,8 @@ interface TaskStateFile {
   groupSize?: number;
   groupLabel?: string;
   groupMode?: "barrier" | "streaming";
+  kind?: "ship" | "scout";
+  reportPath?: string;
   deliveryPosture?: string;
   groupFailPolicy?: "waitAll" | "immediate";
 }
@@ -234,6 +236,7 @@ interface FleetLaunchParams {
   groupId?: string;
   groupLabel?: string;
   groupMode?: "barrier" | "streaming";
+  kind?: "ship" | "scout";
   deliveryPosture?: string;
   groupFailPolicy?: "waitAll" | "immediate";
 }
@@ -249,6 +252,8 @@ function spawnLauncher(taskId: string, title: string, briefPath: string, params:
   if (gid) args.push("--group-id", gid);
   if (params.groupLabel) args.push("--group-label", params.groupLabel);
   if (params.groupMode) args.push("--group-mode", params.groupMode);
+  // scout: solo report (report.md) — nessun commit/PR lato figlio
+  if (params.kind === "scout") args.push("--kind", "scout");
   // T-003: posture di consegna del task (default no-mistakes, già risolta in execute)
   if (params.deliveryPosture) args.push("--delivery-posture", params.deliveryPosture);
   if (params.groupFailPolicy) args.push("--group-fail-policy", params.groupFailPolicy);
@@ -606,6 +611,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       groupId: Type.Optional(Type.String({ description: "Group id for barrier digest (e.g. grp-20260828-a1b2c3). Auto-generated via batch window if omitted." })),
       groupLabel: Type.Optional(Type.String({ description: "Optional label for the group (shown in digest)" })),
       groupMode: Type.Optional(Type.String({ description: "Group mode: barrier (wait all) or streaming (per-task). Default barrier." })),
+      kind: Type.Optional(Type.Union([Type.Literal("ship"), Type.Literal("scout")], { description: "Tipo task: ship (default) o scout (solo report, nessun commit/PR)" })),
       deliveryPosture: Type.Optional(Type.String({ description: "Delivery posture del task (no-mistakes|direct-PR|local-only|yolo). Default: dal config postures.json o no-mistakes." })),
       groupFailPolicy: Type.Optional(Type.String({ description: "waitAll (default) | immediate: failed in gruppo sveglia subito il capitano" })),
     }),
@@ -670,6 +676,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         groupSize: 1, // placeholder — il coordinatore conta reale su disco, o si aggiorna via batch
         groupLabel: params.groupLabel,
         groupMode: effectiveGroupMode,
+        kind: params.kind ?? "ship",
         deliveryPosture: posture,
         groupFailPolicy: params.groupFailPolicy,
       };

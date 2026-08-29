@@ -34,6 +34,7 @@ export interface GroupTaskInfo {
   groupSize: number;
   groupLabel?: string;
   groupMode: "barrier" | "streaming";
+  kind?: "ship" | "scout";
   /** Policy di fallimento del gruppo: waitAll (default) | immediate (failed sveglia subito). */
   groupFailPolicy?: "waitAll" | "immediate";
 }
@@ -64,6 +65,7 @@ export interface TaskStateFile {
   groupSize?: number;
   groupLabel?: string;
   groupMode?: "barrier" | "streaming";
+  kind?: "ship" | "scout";
   groupFailPolicy?: "waitAll" | "immediate";
 }
 
@@ -128,6 +130,7 @@ export function toGroupTaskInfo(task: TaskStateFile): GroupTaskInfo {
     groupSize: task.groupSize ?? 1,
     groupLabel: task.groupLabel,
     groupMode: task.groupMode ?? "barrier",
+    kind: task.kind,
     groupFailPolicy: task.groupFailPolicy,
   };
 }
