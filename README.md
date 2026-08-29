@@ -184,6 +184,7 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 | `fleet_attach <id>` | Focus the herdr pane of the task |
 | `fleet_posture` | Get/set the delivery posture of a project (`get`/`set` + `project`; `posture` only for `set`) |
 | `fleet_outcomes` | Query/audit del registro `branch-outcomes.jsonl` (`limit`/`project`/`verdict`/`raw`) |
+| `fleet_bootstrap` | Verify tools, clean stale state, print a fleet digest (optional `verbose`) |
 
 #### Task scout (solo-indagine)
 
@@ -246,6 +247,18 @@ Dettaglio: `groupId`/`groupSize`/`groupLabel`/`groupMode` in `{id}.json`; stato 
 Usa `immediate` per fail-fast: quando un errore rende inutili gli altri task del gruppo (es. una build che fallisce e invalida gli step successivi). Il campo va passato a `fleet_launch` (`groupFailPolicy`) e finisce in `{id}.json`; il flag CLI è `--group-fail-policy`.
 
 > Nota: la policy riguarda SOLO i `failed`. I `done`/`aborted` restano `waitAll` (bufferizzati) anche con `immediate`; `needs_input` continua a rompere il barrier e svegliare subito in entrambi i casi.
+### Bootstrap (T-006)
+
+At captain session start (and on demand via the `fleet_bootstrap` tool) pi-fleet runs a best-effort, **zero-config** health pass — it never blocks startup and never installs anything:
+
+- **Tool check**: `jq`, `herdr`, `treehouse`, `git`, `gh` (+ `gh auth status` reported per tool in `details`); only missing tools are flagged.
+- **Stale-state cleanup** (safe, non-destructive): orphan `<id>.done.json` markers (no matching `<id>.json`) are moved to `<id>.done.json.orphan`; `<id>.json.bad` files older than 7 days are deleted; active tasks whose herdr pane is gone are **not** touched here (that's `reconcileStaleTasks`'s job) — they are only reported.
+- **Fleet digest**: counts per state, active groups (group logic reused when available, simple count otherwise), most relevant `needs_input` tasks.
+
+The digest is logged to console at every startup; only when there are clear problems (missing tools or pending `needs_input`) a short informational message is shown with `triggerTurn:false` — the session start is never interrupted.
+
+Implementation: `extensions/fleet-bootstrap.ts` (lazy-loaded, fail-soft — same pattern as `fleet-group.ts`).
+
 
 ---
 
@@ -261,7 +274,8 @@ Usa `immediate` per fail-fast: quando un errore rende inutili gli altri task del
 
 ### M2 — `extensions/index.ts` (pi extension)
 
-- 6 `fleet_*` tools; `fleet_launch` spawns the launcher **detached** (double-fork python, survives chat abort)
+- 7 `fleet_*` tools; `fleet_launch` spawns the launcher **detached** (double-fork python, survives chat abort)
+- **Bootstrap** (T-006): at `session_start` (captain only) checks tools, cleans stale state, prints a fleet digest — `extensions/fleet-bootstrap.ts`, lazy-loaded and fail-soft
 - **Watcher** (3s poll) on state transitions:
   - `done` → chat note `deliverAs: followUp` **without** `triggerTurn` (Firstmate parity: visible, never interrupts)
   - `failed` / `needs_input` → `triggerTurn: true` (wakes you)

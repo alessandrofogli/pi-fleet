@@ -22,6 +22,7 @@ import { Type } from "typebox";
 import { mountFleetWatchArm } from "./fleet-watch-arm.js";
 import type { GroupRecord, GroupTaskInfo } from "./fleet-group.js";
 import type { InboxMsg } from "./fleet-inbox.js";
+import type { CheckedTool, GroupSummaryLike } from "./fleet-bootstrap.js";
 // L3.5 barrier — helpers opzionali caricati lazy per fail soft
 let _fleetGroup: typeof import("./fleet-group.js") | null = null;
 async function getFleetGroup(): Promise<typeof import("./fleet-group.js") | null> {
@@ -54,6 +55,15 @@ async function getFleetInbox(): Promise<typeof import("./fleet-inbox.js") | null
 }
 function getFleetInboxSync(): typeof import("./fleet-inbox.js") | null {
   return _fleetInbox;
+}
+// T-006 bootstrap — stesso pattern lazy/fail soft di getFleetGroup
+let _fleetBootstrap: typeof import("./fleet-bootstrap.js") | null = null;
+async function getFleetBootstrap(): Promise<typeof import("./fleet-bootstrap.js") | null> {
+  if (_fleetBootstrap) return _fleetBootstrap;
+  try { _fleetBootstrap = await import("./fleet-bootstrap.js"); return _fleetBootstrap; } catch { return null; }
+}
+function getFleetBootstrapSync(): typeof import("./fleet-bootstrap.js") | null {
+  return _fleetBootstrap;
 }
 }
 
@@ -1079,6 +1089,50 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     },
   });
 
+  // --- fleet_bootstrap (T-006) ---
+  pi.registerTool({
+    name: "fleet_bootstrap",
+    label: "Fleet Bootstrap",
+    description: "Verifica tool, pulizia stati stale e digest della flotta (vedi T-006)",
+    promptSnippet: "Verify fleet tools, clean stale state and print a fleet digest",
+    parameters: Type.Object({
+      verbose: Type.Optional(Type.Boolean({ description: "Includi report completo tool-by-tool e dettaglio pulizie (default: false)" })),
+    }),
+    async execute(_toolCallId: string, params: { verbose?: boolean }) {
+      const mod = await getFleetBootstrap();
+      let tools: CheckedTool[] = [];
+      let cleanup: string[] = [];
+      let digest = "";
+      if (mod) {
+        tools = mod.checkTools();
+        cleanup = mod.cleanupStale(STATE_HOME, listTasks);
+        let groupSummaries: GroupSummaryLike[] | undefined;
+        try {
+          const gmod = getFleetGroupSync();
+          if (gmod) groupSummaries = gmod.buildGroupSummaries(listTasks());
+        } catch { /* fail soft */ }
+        digest = mod.fleetDigest(STATE_HOME, listTasks, groupSummaries);
+      } else {
+        digest = "(modulo bootstrap non disponibile — import fallito)";
+      }
+      const missing = tools.filter((t) => !t.ok);
+      const toolLines = tools.map((t) => {
+        const auth = t.auth !== undefined ? `, auth ${t.auth ? "ok" : "ko"}` : "";
+        return `  - ${t.tool} → ${t.ok ? `ok (${t.path ?? ""}${auth})` : "MANCANTE"}`;
+      });
+      const text = [
+        `**Bootstrap flotta** — ${missing.length > 0 ? `⚠ ${missing.length} problema/i: ${missing.map((m) => m.tool).join(", ")}` : "tutto ok"}`,
+        digest,
+        `**Tool (${tools.length - missing.length}/${tools.length} ok):**\n${toolLines.join("\n")}`,
+        cleanup.length > 0 ? `**Pulizie (${cleanup.length}):**\n${cleanup.map((c) => `  - ${c}`).join("\n")}` : "**Pulizie:** nessuna",
+      ].join("\n\n");
+      return {
+        content: [{ type: "text", text }],
+        details: { tools, cleanup, digest },
+      };
+    },
+  });
+
   // ------------------------------------------------------ ciclo di vita -----
   // L3 watcher esterno: feature flag con fallback in-process (M2)
   // Se fleet-watch-arm.ts o bin/fleet-watch-arm.sh esistono e siamo captain,
@@ -1160,6 +1214,46 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
     void (async () => {
       await reconcileStaleTasks();
       stopWatcher = startWatcher(pi, watch);
+    })();
+  });
+
+  // T-006 — bootstrap alla session_start. Hook SEPARATO da quello sopra
+  // (registrazione multipla di session_start voluta per non collidere con
+  // task paralleli che toccano il blocco esistente). Best-effort, mai bloccante.
+  pi.on("session_start", () => {
+    if (!IS_CAPTAIN) return;
+    void (async () => {
+      try {
+        const mod = await getFleetBootstrap();
+        if (!mod) return;
+        const tools = mod.checkTools();
+        const cleanup = mod.cleanupStale(STATE_HOME, listTasks);
+        let groupSummaries: GroupSummaryLike[] | undefined;
+        try {
+          const gmod = getFleetGroupSync();
+          if (gmod) groupSummaries = gmod.buildGroupSummaries(listTasks());
+        } catch { /* fail soft */ }
+        const digest = mod.fleetDigest(STATE_HOME, listTasks, groupSummaries);
+        console.log(`[pi-fleet bootstrap] ${digest.replace(/\n/g, " | ")}`);
+        const missing = tools.filter((t) => !t.ok);
+        const needsInputCount = listTasks().filter((t) => t.state === "needs_input").length;
+        if (missing.length > 0 || needsInputCount > 0) {
+          const problems: string[] = [];
+          if (missing.length > 0) problems.push(`tool mancanti: ${missing.map((m) => m.tool).join(", ")}`);
+          if (needsInputCount > 0) problems.push(`${needsInputCount} task in attesa di input`);
+          // Messaggio breve e pulito per l'utente iniziale, SENZA interrupt
+          // (triggerTurn:false): l'avvio della sessione non viene mai bloccato.
+          pi.sendMessage(
+            {
+              customType: "fleet_bootstrap",
+              content: `[pi-fleet] All'avvio: ${problems.join("; ")}.\n${digest}`,
+              display: true,
+              details: { tools, cleanup, digest },
+            },
+            { triggerTurn: false, deliverAs: "followUp" },
+          );
+        }
+      } catch { /* fail soft: il bootstrap non deve mai bloccare l'avvio */ }
     })();
   });
 
