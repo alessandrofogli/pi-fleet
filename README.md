@@ -160,7 +160,7 @@ In `postures.json` the map is `{ "<projectPath>": "no-mistakes"|"direct-PR"|"loc
 
 ---
 
-## Configuration — gate di consegna (T-011, opzionale)
+## Configuration — gate di consegna (opzionale)
 
 Su progetti con posture `no-mistakes`, il task può passare da un **gate meccanico deterministico** prima della consegna: task implementa → gate (`bin/gate-run.sh`, solo exit code di processi, nessun AI nel gate) → se rosso **loop di self-fix del figlio** (fixa SOLO ciò che il report segnala, max `loop.maxRounds`) → **verifica finale anti-frode nel launcher** → **PR automatica SOLO se configurata**. Il merge non è MAI automatico (autorità = capitano).
 
@@ -376,7 +376,7 @@ Cosa fa: crea un repo scratch in `/tmp/fleet-smoke-*` (git init + commit inizial
 
 Exit codes: `0` verde · `1` fallito · `2` prerequisiti mancanti.
 
-Dalla stessa run, lo smoke copre anche **due scenari gate (T-011)** su repo scratch dedicati (`/tmp/fleet-gate-{a,b}-*`, `gate.yaml` con `autoPr:false`, nessun remote):
+Dalla stessa run, lo smoke copre anche **due scenari gate** su repo scratch dedicati (`/tmp/fleet-gate-{a,b}-*`, `gate.yaml` con `autoPr:false`, nessun remote):
 
 | Caso | Setup | Esito atteso |
 |---|---|---|
