@@ -39,6 +39,13 @@ async function getFleetOutcomes(): Promise<typeof import("./fleet-outcomes.js") 
 function getFleetOutcomesSync(): typeof import("./fleet-outcomes.js") | null {
   return _fleetOutcomes;
 }
+// T-003 — delivery posture: modulo opzionale caricato lazy per fail soft
+let _fleetPosture: typeof import("./fleet-posture.js") | null = null;
+async function getFleetPosture(): Promise<typeof import("./fleet-posture.js") | null> {
+  if (_fleetPosture) return _fleetPosture;
+  try { _fleetPosture = await import("./fleet-posture.js"); return _fleetPosture; } catch { return null; }
+}
+}
 
 const EXT_DIR = dirname(fileURLToPath(import.meta.url));
 const LAUNCHER = join(EXT_DIR, "..", "bin", "herdr-launch.sh");
@@ -77,6 +84,7 @@ interface TaskStateFile {
   groupSize?: number;
   groupLabel?: string;
   groupMode?: "barrier" | "streaming";
+  deliveryPosture?: string;
   groupFailPolicy?: "waitAll" | "immediate";
 }
 
@@ -213,6 +221,7 @@ interface FleetLaunchParams {
   groupId?: string;
   groupLabel?: string;
   groupMode?: "barrier" | "streaming";
+  deliveryPosture?: string;
   groupFailPolicy?: "waitAll" | "immediate";
 }
 
@@ -227,6 +236,8 @@ function spawnLauncher(taskId: string, title: string, briefPath: string, params:
   if (gid) args.push("--group-id", gid);
   if (params.groupLabel) args.push("--group-label", params.groupLabel);
   if (params.groupMode) args.push("--group-mode", params.groupMode);
+  // T-003: posture di consegna del task (default no-mistakes, già risolta in execute)
+  if (params.deliveryPosture) args.push("--delivery-posture", params.deliveryPosture);
   if (params.groupFailPolicy) args.push("--group-fail-policy", params.groupFailPolicy);
 
   const logPath = join(STATE_HOME, `${taskId}.log`);
@@ -505,6 +516,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       groupId: Type.Optional(Type.String({ description: "Group id for barrier digest (e.g. grp-20260828-a1b2c3). Auto-generated via batch window if omitted." })),
       groupLabel: Type.Optional(Type.String({ description: "Optional label for the group (shown in digest)" })),
       groupMode: Type.Optional(Type.String({ description: "Group mode: barrier (wait all) or streaming (per-task). Default barrier." })),
+      deliveryPosture: Type.Optional(Type.String({ description: "Delivery posture del task (no-mistakes|direct-PR|local-only|yolo). Default: dal config postures.json o no-mistakes." })),
       groupFailPolicy: Type.Optional(Type.String({ description: "waitAll (default) | immediate: failed in gruppo sveglia subito il capitano" })),
     }),
     // L3.5: se lanci N in parallelo nello stesso turno, riusa stesso groupId (auto-batch)
@@ -525,6 +537,11 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         };
       }
       const project = resolved.path;
+      // T-003: posture di consegna — param > config postures.json > default no-mistakes
+      let posture = params.deliveryPosture;
+      const postureMod = await getFleetPosture();
+      if (!posture) posture = postureMod?.getPosture(project) ?? "no-mistakes";
+      if (!(postureMod?.isValidPosture(posture) ?? false)) posture = "no-mistakes";
       const id = `${slugify(params.title) || "task"}-${Math.floor(Math.random() * 1000)}`;
       const briefPath = join(TASKS_DIR, `${id}.brief.md`);
       writeFileSync(briefPath, params.brief);
@@ -563,11 +580,13 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         groupSize: 1, // placeholder — il coordinatore conta reale su disco, o si aggiorna via batch
         groupLabel: params.groupLabel,
         groupMode: effectiveGroupMode,
+        deliveryPosture: posture,
         groupFailPolicy: params.groupFailPolicy,
       };
       writeTask(task);
 
       const launchParams = { ...params, project, effectiveGroupId } as FleetLaunchParams & { effectiveGroupId?: string };
+      launchParams.deliveryPosture = posture;
       // Eredita il modello ATTIVO della sessione main (ctx.model) componendo
       // SEMPRE `provider/id` (es. "opencode-go/deepseek-v4-flash"): le env
       // PI_MODEL/PI_DEFAULT_MODEL sono statiche all'avvio e NON seguono i cambi
@@ -795,6 +814,58 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         }
       }
       return { content: [{ type: "text", text: note }], details: { taskId: params.id, delivered } };
+    },
+  });
+
+  // --- fleet_posture ---
+  pi.registerTool({
+    name: "fleet_posture",
+    label: "Fleet Posture",
+    description: "Gestisce la delivery posture dei progetti (vedi T-003): no-mistakes|direct-PR|local-only|yolo. get → posture corrente; set → scrive in postures.json. La posture viene passata al figlio nel prompt come DELIVERY_POSTURE.",
+    promptSnippet: "Get/set the delivery posture of a project (no-mistakes|direct-PR|local-only|yolo)",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("get"), Type.Literal("set")], { description: "get → posture corrente del progetto; set → imposta e scrive in postures.json" }),
+      project: Type.String({ description: "Project: path assoluto (o short name se FLEET_PROJECTS_DIR è impostato), come fleet_launch." }),
+      posture: Type.Optional(Type.String({ description: "Delivery posture (no-mistakes|direct-PR|local-only|yolo). Solo con action=set." })),
+    }),
+    async execute(_toolCallId: string, params: { action: "get" | "set"; project: string; posture?: string }) {
+      type Details = { ok: boolean; action: "get" | "set"; project?: string; posture?: string; error?: string };
+      let details: Details;
+      let text: string;
+      const resolved = resolveProject(params.project);
+      if (!resolved.ok) {
+        details = { ok: false, action: params.action, error: resolved.error };
+        text = `fleet_posture: ${resolved.error}`;
+      } else {
+        const mod = await getFleetPosture();
+        if (!mod) {
+          details = { ok: false, action: params.action };
+          text = "fleet_posture: modulo fleet-posture non disponibile.";
+        } else if (params.action === "get") {
+          const posture = mod.getPosture(resolved.path);
+          details = { ok: true, action: "get", project: resolved.path, posture };
+          text = `Delivery posture di **${resolved.path}**: **${posture}** (default se non configurata: no-mistakes).`;
+        } else {
+          const posture = params.posture;
+          if (!posture) {
+            details = { ok: false, action: "set", error: "missing posture" };
+            text = "fleet_posture: manca 'posture' con action=set (no-mistakes|direct-PR|local-only|yolo).";
+          } else if (!mod.isValidPosture(posture)) {
+            details = { ok: false, action: "set", error: `invalid posture ${posture}` };
+            text = `fleet_posture: posture non valida '${posture}' (no-mistakes|direct-PR|local-only|yolo).`;
+          } else {
+            try {
+              mod.setPosture(resolved.path, posture);
+              details = { ok: true, action: "set", project: resolved.path, posture };
+              text = `Delivery posture di **${resolved.path}** impostata a **${posture}**.`;
+            } catch (e) {
+              details = { ok: false, action: "set", error: e instanceof Error ? e.message : String(e) };
+              text = `fleet_posture: errore in scrittura: ${e instanceof Error ? e.message : String(e)}`;
+            }
+          }
+        }
+      }
+      return { content: [{ type: "text", text }], details };
     },
   });
 

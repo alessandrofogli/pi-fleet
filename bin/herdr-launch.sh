@@ -17,6 +17,7 @@
 #   --task-id <id>       id task esplicito (default: generato)
 #   --model <prov/mod>   override modello figlio (default: eredita dal parent)
 #   --session <name>     sessione herdr (default: HERDR_SESSION | "default")
+#   --delivery-posture <p>  posture di consegna del task (no-mistakes|direct-PR|local-only|yolo, default: no-mistakes)
 #   --debug              stampa output raw dei comandi herdr
 set -u
 
@@ -32,6 +33,7 @@ GROUP_ID=""
 GROUP_LABEL=""
 GROUP_MODE="barrier"
 GROUP_FAIL_POLICY="waitAll"
+DELIVERY_POSTURE="no-mistakes"
 TITLE=""
 BRIEF=""
 
@@ -47,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --group-label) GROUP_LABEL="$2"; shift 2 ;;
     --group-mode) GROUP_MODE="$2"; shift 2 ;;
     --group-fail-policy) GROUP_FAIL_POLICY="$2"; shift 2 ;;
+    --delivery-posture) DELIVERY_POSTURE="$2"; shift 2 ;;
     --debug) FM_DEBUG=1; shift ;;
     -h|--help) sed -n '1,24p' "$0"; exit 0 ;;
     *)
@@ -233,6 +236,7 @@ cat > "$STATE_JSON.tmp" <<EOF
   "groupSize": 1,
   "groupLabel": $(jq -Rn --arg v "${GROUP_LABEL:-}" '$v'),
   "groupMode": "${GROUP_MODE:-barrier}",
+  "deliveryPosture": $(jq -Rn --arg v "${DELIVERY_POSTURE:-no-mistakes}" '$v'),
   "groupFailPolicy": "${GROUP_FAIL_POLICY:-waitAll}"
 }
 EOF
@@ -313,6 +317,14 @@ Regole:
 - REGOLA CRITICA sulla summary: NON è un verbale di attività. Deve contenere IL RISULTATO richiesto dal brief (punti, elenchi, risposte, decisioni), completo e autocontenuto. Chi la legge (il capitano) deve capire l'esito SENZA aprire altri file. Una riga tipo \"fatto / letto i file\" è INSUFFICIENTE: riporta nel dettaglio ciò che il brief ti chiede di produrre.
 - REGOLA DI FORMATTAZIONE: scrivi la summary in Markdown strutturato — intestazioni, bullet, liste numerate, tabelle dove ha senso. NIENTE muri di prosa continua: se il testo supera poche righe, spezzalo in sezioni con titoli. L'output leggibile è parte del deliverable.
 - Poi termina il turno senza chiedere nulla (questo script chiude il tab e pulisce).
+
+DELIVERY POSTURE: $DELIVERY_POSTURE
+Significato:
+- no-mistakes — committa solo con test/CI verde; mai push; consegna solo su richiesta esplicita del capitano.
+- direct-PR — al termine, se il brief lo autorizza, prepara e APRE la PR (gh pr create) dal branch fleet/<id>; non merge mai.
+- local-only — committa localmente; niente push, niente PR; il capitano decide dopo.
+- yolo — come local-only, ma autorizza push del branch e merge+PR solo se il brief lo chiede ESPRESSAMENTE; mai autonomo senza brief.
+Rispettala durante la consegna; se nel brief non è richiesto nulla di esplicito, comportati secondo la posture. NON eseguire mai push/merge non autorizzati.
 
 Il task è: $BRIEF_CONTENT"
 
