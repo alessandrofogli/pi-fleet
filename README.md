@@ -211,7 +211,8 @@ sono disponibili a ogni `session_start` del capitano (il log di avvio riporta `c
 | Tool | Cosa fa |
 |---|---|
 | `fleet_captain_pref` | `action: "get" \| "set"`, `key`, `value` (solo set), `shared` (default `false` → `captain.md`; `true` → `captain-shared.md`). Get → valore o `null`; set → conferma con la riga scritta. |
-| `fleet_learn` | `title`, `fact`, `implication?`. Appende una sezione datata a `learnings.md`; dedup per titolo nelle ultime 24h (sostituisce la sezione invece di duplicare). |
+| `fleet_learn` | `title`, `fact`, `implication?`, `opts?` (`tier`: `"aging"` \| `"perishable"` \| `"pinned"`, default `aging`; `expiry` obbligatoria per `perishable`, es. "dopo il deploy di v0.4"). Appende una sezione datata a `learnings.md`; dedup per titolo nelle ultime 24h (sostituisce la sezione invece di duplicare). |
+| `fleet_stow` | `dryRun?`, `verbose?` — pass di pruning delle memorie (T-012): stale → refresh o archivio; dedup; budget. `dryRun: true` → solo report, zero scritture. |
 
 **Formato dei file** (righe `chiave: valore`, commenti `#`, sezioni `##` libere):
 
@@ -231,6 +232,30 @@ sono disponibili a ogni `session_start` del capitano (il log di avvio riporta `c
 
 I tre file vengono creati con header se assenti (`ensureFiles` alla `session_start`); gli aggiornamenti
 sono curati (niente append infinito) e scritti atomicamente (tmp+rename).
+
+### Memorie: pruning (T-012)
+
+Le memorie non crescono all'infinito: un **pass** (`fleet_stow`, o automatico a `session_start` del
+capitano, max 1 pass/giorno via `~/.pi/fleet/.stow-last-pass`) applica i **tier** con orizzonte di
+decadimento e ri-valida → **refresh** o **archiviazione** in `~/.pi/fleet/memory-archive.md`.
+
+**Tier** (marker embedded in coda all'entry, invisibili nel rendering):
+
+| Tier | Marker | Decadimento | Default per |
+|---|---|---|---|
+| `pinned` | nessuno (`<!--pin-->` in learnings) | mai invecchia, esente da decay e budget | `captain.md` / `captain-shared.md` |
+| `aging` | `<!--a:YYYY-MM-DD-->` | stale a ≥30 giorni → refresh (data=oggi) se confermata, altrimenti archivio | `learnings.md` |
+| `perishable` | `<!--p:YYYY-MM-DD-->` | stale a ≥7 giorni; la prosa DEVE nominare una condizione di scadenza (riga `Scadenza:`), altrimenti trattata come `aging` | — |
+
+**Comportamento del pass** (`fleet_stow`, `dryRun: true` → solo report):
+
+- stale unico → **refreshed** (rinnovo data marker) o **archiviato** in `memory-archive.md` (sezione `## YYYY-MM-DD — <entry>` + `Provenance: stowed`) — **MAI delete di un fatto unico**;
+- duplicati / fatti già posseduti → rimozione (capitans: chiavi duplicate; learnings: titoli duplicati);
+- **migrazione one-time**: entry legacy senza marker → confermata = stampa marker di oggi (30gg di grace); entry `<!--g-->` non ri-validata al pass successivo → archivio con `Provenance: legacy-unvalidated` (la conferma avviene ri-aggiungendo la learning: il dedup 24h rigenera il marker);
+- **budget opzionale**: `~/.pi/fleet/startup-memory-budget` (default **7500 token stimati**, `ceil(byte/3)` per file, somma sui 3 file) → sopra soglia archivia i non-pinned più vecchi (mai pinned) e riporta overflow. Zero-config: report + archivio, nessun enforcement più severo.
+
+Il decay scatta **solo al pass** (nessun timer in background); il pass automatico alla `session_start` è
+best-effort, mai bloccante, con guard su `.stow-last-pass` (1 pass/giorno).
 
 
 ### Task states
