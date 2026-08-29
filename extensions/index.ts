@@ -1141,6 +1141,9 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         content: [{ type: "text", text }],
         details: { tools, cleanup, digest },
       };
+    },
+  });
+
   // --- fleet_learn (5b.5) ---
   pi.registerTool({
     name: "fleet_learn",
