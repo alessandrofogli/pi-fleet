@@ -18,6 +18,10 @@
 #   --session <name>     herdr session (default: HERDR_SESSION | "default")
 #   --delivery-posture <p>  task delivery posture (no-mistakes|direct-PR|local-only|yolo, default: no-mistakes)
 #   --group-fail-policy <p>  waitAll (default) | immediate: a failed group task wakes the captain immediately
+#   --nested              T-013: nested orchestrator opt-in — the child session gets the
+#                         fleet_* tools + a subtree-scoped watcher (fleet_notice/group digests)
+#   --depth <n>           T-013: the child's own depth (captain=0; +1 per nesting level; default 1)
+#   --parent-task-id <id> T-013: task id that launched this child (empty for captain launches)
 #   --gate              mechanical gate active (T-011): the launcher re-runs the anti-fraud gate itself
 #                       at task end; the child receives the GATE section in the prompt (only no-mistakes posture)
 #   --auto-pr <bool>    automatic PR on green gate (true|false, from gate.yaml). Merge NEVER automatic.
@@ -40,6 +44,9 @@ GROUP_MODE="barrier"
 KIND="ship"
 DELIVERY_POSTURE="no-mistakes"
 GROUP_FAIL_POLICY="waitAll"
+NESTED=0
+CHILD_DEPTH=1
+PARENT_TASK_ID=""
 GATE_ACTIVE=0
 AUTO_PR="false"
 TITLE=""
@@ -59,6 +66,9 @@ while [[ $# -gt 0 ]]; do
     --kind) KIND="$2"; shift 2 ;;
     --delivery-posture) DELIVERY_POSTURE="$2"; shift 2 ;;
     --group-fail-policy) GROUP_FAIL_POLICY="$2"; shift 2 ;;
+    --nested) NESTED=1; shift ;;
+    --depth) CHILD_DEPTH="$2"; shift 2 ;;
+    --parent-task-id) PARENT_TASK_ID="$2"; shift 2 ;;
     --gate) GATE_ACTIVE=1; shift ;;
     --auto-pr) AUTO_PR="$2"; shift 2 ;;
     --debug) FM_DEBUG=1; shift ;;
@@ -249,7 +259,10 @@ cat > "$STATE_JSON.tmp" <<EOF
   "groupMode": "${GROUP_MODE:-barrier}",
   "kind": "${KIND:-ship}",
   "deliveryPosture": $(jq -Rn --arg v "${DELIVERY_POSTURE:-no-mistakes}" '$v'),
-  "groupFailPolicy": "${GROUP_FAIL_POLICY:-waitAll}"
+  "groupFailPolicy": "${GROUP_FAIL_POLICY:-waitAll}",
+  "nested": ${NESTED},
+  "depth": ${CHILD_DEPTH:-1},
+  "parentTaskId": $(jq -Rn --arg v "$PARENT_TASK_ID" '$v')
 }
 EOF
 mv "$STATE_JSON.tmp" "$STATE_JSON"  # atomic: no mid-reads by the watcher
@@ -276,7 +289,8 @@ close_tab() {
 WORKSPACE="$(resolve_fleet_workspace)"
 [[ -z "$WORKSPACE" ]] && { herr "unable to create/resolve the fleet workspace"; fail_task "fleet workspace not resolvable"; release_worktree; exit 1; }
 log "fleet workspace: $WORKSPACE"
-TB_OUT="$(herdr_cli tab create --workspace "$WORKSPACE" --cwd "$TASK_CWD" --label "$TASK_ID" --no-focus)"
+TB_OUT="$(herdr_cli tab create --workspace "$WORKSPACE" --cwd "$TASK_CWD" --label "$TASK_ID" --no-focus \
+  --env "FLEET_TASK_ID=$TASK_ID" --env "FLEET_DEPTH=$CHILD_DEPTH")"
 TAB_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)"
 PANE_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)"
 [[ -z "$TAB_ID" || -z "$PANE_ID" ]] && { herr "tab create without tab/pane id: $TB_OUT"; fail_task "tab create failed: $TB_OUT"; release_worktree; exit 1; }
@@ -322,6 +336,14 @@ if [[ "$KIND" == "scout" ]]; then
   SCOUT_RULES="- YOU ARE A SCOUT TASK (report only). Your deliverable is a \`report.md\` file at the root of the cwd with the complete result of the analysis. Do NOT commit, do NOT push, do NOT open a PR. In the done-marker add \"reportPath\":\"report.md\" (relative path)."
   log "kind: scout (report only, no commit/PR)"
 fi
+# T-013: nested orchestrator rules (only with --nested): the child may use the
+# fleet_* tools to launch/manage its OWN subtasks (review loops, pipelines). The
+# depth cap is enforced by the extension at launch time; delivery is unchanged.
+NESTED_RULES=""
+if [[ "$NESTED" == "1" ]]; then
+  NESTED_RULES="- YOU ARE A NESTED ORCHESTRATOR (launched with nested:true, depth ${CHILD_DEPTH:-1}): you MAY use the fleet_* tools (fleet_launch, fleet_status, fleet_peek, fleet_steer, fleet_abort) to spawn and manage YOUR OWN subtasks (review loops, pipelines). Your fleet view and targets are SCOPED to your own subtree — you can only manage tasks you launched. Depth is capped: a launch beyond the configured max (postures.json \$config.nestedMaxDepth, default 2) is denied with a clear message; treat that as a limit, not a bug. Do NOT use fleet_bootstrap / fleet_learn / fleet_captain_pref / fleet_stow (captain-only tools)."
+  log "nested: orchestrator enabled (depth ${CHILD_DEPTH:-1})"
+fi
 # T-011 mechanical gate: conditional GATE section (only when --gate, i.e.
 # no-mistakes posture AND project with gate.yaml). The child owns the self-fix
 # loop (firstmate model: the worker owns run/fix). The anti-fraud is in the
@@ -356,6 +378,7 @@ Rules:
 - Then end the turn without asking anything (this script closes the tab and cleans up).
 ${SCOUT_RULES}
 ${GATE_RULES}
+${NESTED_RULES}
 
 DELIVERY POSTURE: $DELIVERY_POSTURE
 Meaning:
