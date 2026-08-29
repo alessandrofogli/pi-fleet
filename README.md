@@ -214,7 +214,7 @@ sono disponibili a ogni `session_start` del capitano (il log di avvio riporta `c
 |---|---|
 | `fleet_captain_pref` | `action: "get" \| "set"`, `key`, `value` (solo set), `shared` (default `false` → `captain.md`; `true` → `captain-shared.md`). Get → valore o `null`; set → conferma con la riga scritta. |
 | `fleet_learn` | `title`, `fact`, `implication?`, `opts?` (`tier`: `"aging"` \| `"perishable"` \| `"pinned"`, default `aging`; `expiry` obbligatoria per `perishable`, es. "dopo il deploy di v0.4"). Appende una sezione datata a `learnings.md`; dedup per titolo nelle ultime 24h (sostituisce la sezione invece di duplicare). |
-| `fleet_stow` | `dryRun?`, `verbose?` — pass di pruning delle memorie (T-012): stale → refresh o archivio; dedup; budget. `dryRun: true` → solo report, zero scritture. |
+| `fleet_stow` | `dryRun?`, `verbose?` — pass di pruning delle memorie: stale → refresh o archivio; dedup; budget. `dryRun: true` → solo report, zero scritture. |
 
 **Formato dei file** (righe `chiave: valore`, commenti `#`, sezioni `##` libere):
 
@@ -235,7 +235,7 @@ sono disponibili a ogni `session_start` del capitano (il log di avvio riporta `c
 I tre file vengono creati con header se assenti (`ensureFiles` alla `session_start`); gli aggiornamenti
 sono curati (niente append infinito) e scritti atomicamente (tmp+rename).
 
-### Memorie: pruning (T-012)
+### Memorie: pruning
 
 Le memorie non crescono all'infinito: un **pass** (`fleet_stow`, o automatico a `session_start` del
 capitano, max 1 pass/giorno via `~/.pi/fleet/.stow-last-pass`) applica i **tier** con orizzonte di

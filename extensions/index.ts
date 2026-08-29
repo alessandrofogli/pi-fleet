@@ -1239,7 +1239,7 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fleet_stow",
     label: "Fleet Stow",
-    description: "Pass di pruning delle memorie capitano/learnings (vedi T-012). Tier aging (30gg) / perishable (7gg) / pinned; stale → refresh o archivio in ~/.pi/fleet/memory-archive.md (mai delete di unici); dedup duplicati; budget di avvio opzionale (default 7500 tok) con report di overflow. dryRun=true → solo report, zero scritture.",
+    description: "Pass di pruning delle memorie capitano/learnings. Tier aging (30gg) / perishable (7gg) / pinned; stale → refresh o archivio in ~/.pi/fleet/memory-archive.md (mai delete di unici); dedup duplicati; budget di avvio opzionale (default 7500 tok) con report di overflow. dryRun=true → solo report, zero scritture.",
     promptSnippet: "Run a memory pruning pass (stow)",
     parameters: Type.Object({
       dryRun: Type.Optional(Type.Boolean({ description: "true → solo report, zero scritture" })),
