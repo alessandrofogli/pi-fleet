@@ -187,6 +187,7 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 | `fleet_bootstrap` | Verify tools, clean stale state, print a fleet digest (optional `verbose`) |
 | `fleet_learn` | Record an operational learning in `learnings.md` (`title`, `fact`, `implication?`) |
 | `fleet_captain_pref` | Get/set a captain preference (`action`, `key`, `value?` per set, `shared?`) |
+| `fleet_watch_arm_pi` | Start the first watcher cycle or repair a cycle reported missing/failed/unhealthy (re-arming is otherwise automatic) |
 
 #### Task scout (solo-indagine)
 
@@ -280,6 +281,7 @@ Dettaglio: `groupId`/`groupSize`/`groupLabel`/`groupMode` in `{id}.json`; stato 
 Usa `immediate` per fail-fast: quando un errore rende inutili gli altri task del gruppo (es. una build che fallisce e invalida gli step successivi). Il campo va passato a `fleet_launch` (`groupFailPolicy`) e finisce in `{id}.json`; il flag CLI è `--group-fail-policy`.
 
 > Nota: la policy riguarda SOLO i `failed`. I `done`/`aborted` restano `waitAll` (bufferizzati) anche con `immediate`; `needs_input` continua a rompere il barrier e svegliare subito in entrambi i casi.
+
 ### Bootstrap (T-006)
 
 At captain session start (and on demand via the `fleet_bootstrap` tool) pi-fleet runs a best-effort, **zero-config** health pass — it never blocks startup and never installs anything:
