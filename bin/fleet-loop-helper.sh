@@ -138,13 +138,14 @@ emit_findings() {
 # split on commas, strip a trailing ":<line>" / ":<line>-<line>" per part.
 FILES_JQ='
   def files_of:
-    ( .location | split(",")
+    .location as $loc
+    | ( $loc | split(",")
       | map(gsub("^[[:space:]]+|[[:space:]]+$"; ""))
       | map(select(length > 0))
       | map(if test(":[0-9]+(-[0-9]+)?$") then
               sub(":[0-9]+(-[0-9]+)?$"; "") else . end)
       | map(select(length > 0)) )
-    | if length == 0 then [.location] else unique | sort end;
+    | if length == 0 then [$loc] else unique | sort end;
 '
 
 # Union-find over finding indexes (path compression, deterministic: the lexically
@@ -312,7 +313,7 @@ cmd_spec_validate() {
     || add_err "slices[].deps: required array of strings (may be empty)"
   jq -e '.slices | group_by(.id) | all(length == 1)' <<<"$spec" >/dev/null 2>&1 \
     || add_err "slices[].id: must be unique"
-  jq -e '(.slices | map(.id)) as $ids | .slices | all(.[]; all(.deps[]; ($ids | index(.)) != null))' <<<"$spec" >/dev/null 2>&1 \
+  jq -e '(.slices | map(.id)) as $ids | .slices | all(.[]; all(.deps[]; . as $d | ($ids | index($d)) != null))' <<<"$spec" >/dev/null 2>&1 \
     || add_err "slices[].deps: must reference existing slice ids"
   jq -e '.slices | all(.[]; ([keys[]] | all(. as $k | (["id","title","impl_skills","review_skills","deps"] | index($k)) != null)))' <<<"$spec" >/dev/null 2>&1 \
     || add_err "slice has unknown key(s) (allowed: id, title, impl_skills, review_skills, deps)"
@@ -326,7 +327,7 @@ cmd_spec_validate() {
   # deps DAG: bounded iterative removal (no jq recursion: a recursive topo on a
   # non-progressing update can spin forever). A cycle exists iff some nodes can
   # never be resolved because their deps are still present.
-  if jq -e '(.slices | map(.id)) as $ids | .slices | all(.[]; all(.deps[]; ($ids | index(.)) != null))' <<<"$spec" >/dev/null 2>&1; then
+  if jq -e '(.slices | map(.id)) as $ids | .slices | all(.[]; all(.deps[]; . as $d | ($ids | index($d)) != null))' <<<"$spec" >/dev/null 2>&1; then
     local cycle
     cycle="$(jq -c '
       ( [ .slices[] | {id: .id, deps: .deps} ] ) as $S
