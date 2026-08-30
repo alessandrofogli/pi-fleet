@@ -129,8 +129,8 @@ append_cycle_log() {
 classify_output() {
   local out_file="$1"
   # Returns reason string or empty
-  if grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$out_file" 2>/dev/null; then
-    grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$out_file" 2>/dev/null | head -1 | tr -d '\r' | cut -c1-512
+  if grep -Eq '^(signal:|stale:|check:|health:|heartbeat($|:))' "$out_file" 2>/dev/null; then
+    grep -E '^(signal:|stale:|check:|health:|heartbeat($|:))' "$out_file" 2>/dev/null | head -1 | tr -d '\r' | cut -c1-512
     return 0
   fi
   if grep -q 'watcher: healthy' "$out_file" 2>/dev/null; then
@@ -279,7 +279,7 @@ fi
 REASON=""
 if REASON=$(classify_output "$WATCH_OUT"); then
   # Has a classifiable reason
-  if printf '%s' "$REASON" | grep -Eq '^(signal:|stale:|check:|heartbeat)'; then
+  if printf '%s' "$REASON" | grep -Eq '^(signal:|stale:|check:|health:|heartbeat)'; then
     # Actionable → append delivery, print reason, log cycle, exit 0
     append_delivery "$WATCHER_PID" "$REASON"
     printf '%s\n' "$REASON"

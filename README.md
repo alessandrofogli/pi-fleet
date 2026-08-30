@@ -452,6 +452,30 @@ Optional environment:
 | `SMOKE_KEEP=1` | do not remove scratch/state at the end of the run (debug) |
 | `HERDR_SESSION` | herdr session to use (default `default`) |
 
+### Headless acceptance smokes (no herdr, no real fleet state)
+
+```bash
+bash tests/smoke-health.sh        # T-019 frozen-pane watchdog fixtures (18 checks)
+bash tests/smoke-loop-bound.sh    # T-019 mechanical loop bound (17 checks)
+bash tests/smoke-loop.sh          # review&fix loop semantics (4 scenarios)
+```
+
+- `smoke-health.sh`: a **mocked herdr** (PATH-shadowed fake serving a controlled
+  agent list, recording tab/pane close) + a recording launcher stub
+  (`FLEET_RELAUNCH_LAUNCHER`). No real pane is ever killed. Proves the ladder
+  hang-detection → auto-steer (`health: <id> bash-timeout`, durable inbox
+  'abort command + commit WIP') → kill + relaunch (`health: <id> relaunch`,
+  untracked files salvaged into the branch first, `--resume` invoked); ack
+  resets the timer; `pane-stale` trigger for idle agents; growing context
+  (revision) is never killed; `needs_input` never touched.
+- `smoke-loop-bound.sh`: `bin/fleet-loop-helper.sh` `loop-init/next/final`
+  against a scratch `FLEET_STATE_HOME`: mechanical refusal of a 4th cycle
+  (`refused:"maxCycles"`) and of terminal verdicts before the bound
+  (`refused:"early-exit"`), loopId sanitization.
+
+Both run entirely in `/tmp` scratch (state, repo, fakes) and never touch
+`~/.pi/fleet`.
+
 ---
 
 ## Architecture
@@ -489,6 +513,18 @@ Wake **even when Pi is closed**. Zero-token: the model runs only on actionable e
 - **What it does**: `fleet-watch.sh` polls (3s) and absorbs benign (`running` with fresh beat); on `done`/`failed`/`needs_input`/new queue file it writes the queue and exits with the reason — the arm layer re-arms before waking.
 - **Fallback**: if L3 scripts are absent, L2 still works (extension catches and degrades).
 
+**Frozen-pane recovery (T-019)** — the external watcher is also a pane-health
+watchdog: the heartbeat is **context growth** (herdr `revision`, never the
+"Working…" spinner). A pane static for `bashTimeoutS` (per-task, 120–300s,
+`--bash-timeout-s`) or the stale window (10min) gets an auto-steer (durable
+inbox: "abort command + commit WIP"); if not acked within the kill window
+(5min), the watcher **kills the pane and relaunches from the last WIP commit**
+via `bin/fleet-relaunch.sh` + `bin/herdr-launch.sh --resume` (untracked files
+salvaged first, `groupId`/`nested` preserved, `relaunches[]` recorded). Acking
+the steer resets the timer — legit long commands get a configured tolerance.
+Child rules (wrapped into every child prompt): long commands carry an explicit
+`timeout`; no untracked files; WIP commit after recon.
+
 See `docs/ARCHITECTURE.md` for the full L3 flow, state layout, and differences from firstmate.
 
 ---
@@ -504,6 +540,7 @@ See `docs/ARCHITECTURE.md` for the full L3 flow, state layout, and differences f
 | Phantom wake at startup | already-finished tasks from previous sessions → seeding + reconcile |
 | `fleet_notice` inside a still-running subagent | extension also active in children → captain gate (`cwd=HOME`) |
 | Child has different model than main | static `PI_*` at startup → now `ctx.model` composed as `provider/id` (never bare id) |
+| Pane frozen ("Working…" but no context growth) | T-019 watchdog: auto-steer → ack, or kill + relaunch from the last WIP commit (`bin/fleet-relaunch.sh`); `health: <id> relaunch` wakes the captain |
 | Child dead and launcher waits 6h | liveness-check every 15s → `failed` in ~30s |
 | Report "wall of text" | it's the **child's** summary (main doesn't rewrite); child prompt now requires structured markdown |
 | Main polling after launch | `AGENTS.md`/tool guidelines: close the turn after `fleet_launch` |

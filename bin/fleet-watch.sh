@@ -13,6 +13,7 @@ STATE="${FLEET_STATE_HOME:-$HOME/.pi/fleet}"
 mkdir -p "$STATE" 2>/dev/null || true
 mkdir -p "$STATE/.wake-queue" 2>/dev/null || true
 mkdir -p "$STATE/tasks" 2>/dev/null || true
+mkdir -p "$STATE/.health" 2>/dev/null || true
 
 # shellcheck source=bin/fleet-lock-lib.sh
 . "$SCRIPT_DIR/fleet-lock-lib.sh"
@@ -25,6 +26,18 @@ fi
 POLL="${FLEET_POLL:-3}"
 HEARTBEAT="${FLEET_HEARTBEAT:-60}"
 SIGNAL_GRACE=5
+
+# T-019 pane-health watchdog thresholds:
+#   stale window  (context not growing) before the auto-steer -> default 10 min
+#   kill window   (steer not acked) before kill+relaunch     -> default 5 min
+#   bash timeout  (per-command tolerance) -> per-task state.bashTimeoutS (120..300)
+# Test/debug overrides (integer seconds) win over the minute defaults.
+STALE_T=$(( ${FLEET_HEALTH_STALE_MIN:-10} * 60 ))
+KILL_T=$(( ${FLEET_HEALTH_KILL_MIN:-5} * 60 ))
+case "${FLEET_HEALTH_STALE_S:-}" in ''|*[!0-9]*) : ;; *) STALE_T=$FLEET_HEALTH_STALE_S ;; esac
+case "${FLEET_HEALTH_KILL_S:-}" in ''|*[!0-9]*) : ;; *) KILL_T=$FLEET_HEALTH_KILL_S ;; esac
+[ "$STALE_T" -lt 1 ] && STALE_T=1
+[ "$KILL_T" -lt 1 ] && KILL_T=1
 
 # Numeric validation (avoids arithmetic error under set -u)
 case "$POLL" in ''|*[!0-9]*) POLL=3 ;; esac
@@ -187,6 +200,14 @@ while :; do
   case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
   _now_ms=$((_now * 1000))
 
+  # One agent list per poll: shared by the pane-liveness check and the T-019
+  # pane-health watchdog (revision = context-growth heartbeat). Fail soft:
+  # herdr missing/down -> empty (both checks skip, nothing is killed).
+  _agents=""
+  if command -v herdr >/dev/null 2>&1; then
+    _agents="$(herdr --session "${HERDR_SESSION:-default}" agent list 2>/dev/null || true)"
+  fi
+
   # Scans task JSON (excludes already-filtered markers)
   for _f in "$STATE"/*.json; do
     [ -e "$_f" ] || continue
@@ -241,13 +262,131 @@ while :; do
       if [ -n "$_paneId" ] && [ "$_startedAt" -gt 0 ]; then
         _age_ms=$((_now_ms - _startedAt))
         if [ "$_age_ms" -gt 30000 ]; then
-          if command -v herdr >/dev/null 2>&1; then
-            _agents=$(herdr --session "${HERDR_SESSION:-default}" agent list 2>/dev/null || true)
+          if [ -n "$_agents" ]; then
+            if ! printf '%s' "$_agents" | jq -e --arg p "$_paneId" '[.result.agents[]? | select(.pane_id==$p)] | length > 0' >/dev/null 2>&1; then
+              _actionable="stale: ${_tid} pane dead"
+              _taskId_found="$_tid"
+              break
+            fi
+          fi
+          # ----- T-019 pane-health watchdog (running panes only) -----
+          # Heartbeat = context growth (herdr per-agent `revision`; fallback =
+          # the `agent read` transcript checksum). The 'Working…' spinner is a
+          # session-state flag, NOT context growth, and never counted as alive.
+          # Ladder: static for min(bashTimeoutS, staleT) -> auto-steer
+          # 'abort command + commit WIP' (inbox seq + immediate prompt) and exit
+          # with `health: <tid> <trigger>`; no ack for killT -> fleet-relaunch.sh
+          # (salvage -> kill -> resume) and exit with `health: <tid> relaunch`.
+          if [ "$_state" = "running" ] && [ ! -f "$STATE/${_tid}.relaunch" ] && [ ! -f "$STATE/${_tid}.abort" ]; then
+            _hrev=""
+            _hstatus=""
             if [ -n "$_agents" ]; then
-              if ! printf '%s' "$_agents" | jq -e --arg p "$_paneId" '[.result.agents[]? | select(.pane_id==$p)] | length > 0' >/dev/null 2>&1; then
-                _actionable="stale: ${_tid} pane dead"
-                _taskId_found="$_tid"
-                break
+              _hprobe="$(printf '%s' "$_agents" | jq -r --arg p "$_paneId" \
+                '.result.agents[]? | select(.pane_id==$p) | [((.revision // "")|tostring), (.agent_status // "")] | @tsv' 2>/dev/null || true)"
+              if [ -n "$_hprobe" ]; then
+                _hrev="${_hprobe%%$'\t'*}"
+                _hrest="${_hprobe#*$'\t'}"
+                [ "$_hrest" != "$_hprobe" ] && _hstatus="$_hrest"
+              fi
+            fi
+            if [ -z "$_hrev" ] && command -v herdr >/dev/null 2>&1; then
+              _hrev="$(herdr --session "${HERDR_SESSION:-default}" agent read "$_paneId" 2>/dev/null | cksum 2>/dev/null | awk '{print $1}')"
+            fi
+            if [ -n "$_hrev" ]; then
+              _last_file="$STATE/.health/$_tid.last"
+              _prev_rev=""
+              _static_since="$_now"
+              _p1_seq=""
+              _p1_at=""
+              _p1_reason=""
+              _relaunch_count=0
+              if [ -f "$_last_file" ]; then
+                _prev_rev="$(jq -r '.rev // ""' "$_last_file" 2>/dev/null || true)"
+                _st="$(jq -r '.staticSince // empty' "$_last_file" 2>/dev/null || true)"
+                case "$_st" in ''|*[!0-9]*) _st="" ;; esac
+                [ -n "$_st" ] && _static_since="$_st"
+                _p1_seq="$(jq -r '.p1Seq // ""' "$_last_file" 2>/dev/null || true)"
+                _p1_at="$(jq -r '.p1At // ""' "$_last_file" 2>/dev/null || true)"
+                _p1_reason="$(jq -r '.p1Reason // ""' "$_last_file" 2>/dev/null || true)"
+                _rc="$(jq -r '.relaunchCount // 0' "$_last_file" 2>/dev/null || true)"
+                case "$_rc" in ''|*[!0-9]*) _rc=0 ;; esac
+                _relaunch_count="$_rc"
+              fi
+              # per-task bash tolerance (120..300 from the launcher; env override for tests/drills)
+              _bash_t=300
+              _bt="$(jq -r '.bashTimeoutS // 0' "$_f" 2>/dev/null || echo 0)"
+              case "$_bt" in ''|*[!0-9]*) _bt=0 ;; esac
+              [ "$_bt" -ge 120 ] && [ "$_bt" -le 300 ] && _bash_t="$_bt"
+              case "${FLEET_HEALTH_BASH_TIMEOUT_S:-}" in ''|*[!0-9]*) : ;; *) _bash_t=$FLEET_HEALTH_BASH_TIMEOUT_S ;; esac
+              [ "$_bash_t" -lt 1 ] && _bash_t=1
+              _stale=$((_now - _static_since))
+              _write_health() {
+                local rev="$1" since="$2" p1s="${3:-}" p1a="${4:-}" p1r="${5:-}" rc="${6:-$_relaunch_count}"
+                jq -nc --arg rev "$rev" --argjson since "$since" \
+                  --argjson p1s "${p1s:-null}" --argjson p1a "${p1a:-null}" --arg p1r "$p1r" --argjson rc "$rc" \
+                  '{rev:$rev, staticSince:$since, p1Seq:$p1s, p1At:$p1a, p1Reason:$p1r, relaunchCount:$rc}' \
+                  > "$_last_file.tmp.$$" 2>/dev/null && mv "$_last_file.tmp.$$" "$_last_file" 2>/dev/null || true
+              }
+              if [ "$_prev_rev" != "$_hrev" ]; then
+                # context grew -> alive: reset the staleness clock and any pending steer
+                _write_health "$_hrev" "$_now"
+                _fleet_triage_log "health ok: $_tid rev changed"
+              elif [ -n "$_p1_seq" ]; then
+                # auto-steer sent: an ack resets the timer; silence for killT -> kill+relaunch
+                if [ -f "$STATE/$_tid.inbox/$_p1_seq.acked" ]; then
+                  _fleet_triage_log "health recovered: $_tid acked steer #$_p1_seq — timer reset"
+                  _write_health "$_hrev" "$_now"
+                else
+                  _p1a=${_p1_at:-0}
+                  case "$_p1a" in ''|*[!0-9]*) _p1a=0 ;; esac
+                  if [ $((_now - _p1a)) -ge "$KILL_T" ]; then
+                    _relaunch_count=$((_relaunch_count + 1))
+                    _write_health "$_hrev" "$_static_since" "" "" "" "$_relaunch_count"
+                    # DETACHED: the relaunch runs the full launcher cycle; the watcher
+                    # must not block on it (it exits with the health reason right away).
+                    ( bash "$SCRIPT_DIR/fleet-relaunch.sh" "$_tid" \
+                        --reason "T-019: no ack of steer #$_p1_seq (${_p1_reason:-frozen}) after ${KILL_T}s" \
+                        >/dev/null 2>&1 & )
+                    _fleet_triage_log "health relaunch invoked (detached) for $_tid (relaunch#$_relaunch_count)"
+                    _actionable="health: ${_tid} relaunch"
+                    _taskId_found="$_tid"
+                    break
+                  fi
+                fi
+              else
+                # static context: threshold reached -> auto-steer 'abort + commit WIP'
+                _trigger=""
+                if [ "$_stale" -ge "$_bash_t" ] && [ "$_hstatus" = "working" ]; then
+                  _trigger="bash-timeout"
+                elif [ "$_stale" -ge "$STALE_T" ]; then
+                  _trigger="pane-stale"
+                fi
+                if [ -n "$_trigger" ]; then
+                  _dir="$STATE/$_tid.inbox"
+                  mkdir -p "$_dir/handled" 2>/dev/null || true
+                  _seq=0
+                  for _f2 in "$_dir"/*.json "$_dir"/handled/*.json; do
+                    [ -e "$_f2" ] || continue
+                    _b2=$(basename "$_f2" .json)
+                    case "$_b2" in ''|*[!0-9]*) continue ;; esac
+                    [ "$_b2" -gt "$_seq" ] && _seq="$_b2"
+                  done
+                  _seq=$((_seq + 1))
+                  _ack_path="$_dir/$_seq.acked"
+                  _msg="T-019 health watchdog ($_trigger): your pane has had NO context growth for ${_stale}s (heartbeat = context growth, NOT the Working spinner). ABORT the current command if any; commit ALL work now INCLUDING untracked files (ONE COMMIT PER FILE). Then ack by creating the empty file: $_ack_path . If you are running a legitimately long command, ack immediately (this resets the watchdog timer); otherwise the pane will be KILLED and relaunched from the last WIP commit."
+                  jq -nc --arg m "$_msg" --argjson at "$((_now * 1000))" --argjson seq "$_seq" \
+                    '{seq:$seq, message:$m, createdAt:$at, acked:false, replays:0}' \
+                    > "$_dir/$_seq.json.tmp.$$" 2>/dev/null && mv "$_dir/$_seq.json.tmp.$$" "$_dir/$_seq.json" 2>/dev/null || true
+                  # immediate best-effort delivery (the captain's durable inbox re-ring also covers it)
+                  if command -v herdr >/dev/null 2>&1; then
+                    herdr --session "${HERDR_SESSION:-default}" agent prompt "$_paneId" "$_msg" >/dev/null 2>&1 || true
+                  fi
+                  _fleet_triage_log "health steer: $_tid seq=$_seq trigger=$_trigger stale=${_stale}s (pane $_paneId)"
+                  _write_health "$_hrev" "$_static_since" "$_seq" "$_now" "$_trigger"
+                  _actionable="health: ${_tid} ${_trigger}"
+                  _taskId_found="$_tid"
+                  break
+                fi
               fi
             fi
           fi

@@ -41,9 +41,21 @@ Follow the **`fleet-review-loop`** skill (orchestrator procedure) and hand the
 
 ## LOOP SEMANTICS (non-negotiable)
 
-1. **Exactly 3 fixed cycles.** Never early-exit on a first PASS. Cycle 2 and
-   cycle 3 are FRESH reviews from scratch (fresh reviewer tasks, never reused
-   sessions). A cycle is: review wave → findings → fix wave → verify.
+1. **Exactly 3 fixed cycles — MECHANICALLY ENFORCED (T-019).** The loop bound
+   lives in `$FLEET_STATE_HOME/<loopId>.loop.json` (default `~/.pi/fleet/`), a
+   `{cycle, maxCycles}` counter read/updated by `bin/fleet-loop-helper.sh` EVERY
+   cycle (never trust the prompt alone). Let `H={{PI_FLEET_ROOT}}/bin/fleet-loop-helper.sh`
+   and `LOOP_ID=loop-{{PIPELINE_ID}}`.
+   - **Start of every cycle** run `$H loop-next $LOOP_ID 3`. It either returns
+     `{"ok":true,"cycle":N,...}` (proceed) or **REFUSES** with
+     `{"ok":false,"refused":"maxCycles"}` (exit 1): then STOP the loop, write the
+     done-marker `FAILED_TO_CONVERGE` with the report — do NOT start another cycle.
+   - **No early-exit verdicts**: before writing ANY terminal verdict (PASS or
+     FAILED_TO_CONVERGE) run `$H loop-final $LOOP_ID 3`. A refusal
+     (`refused:"early-exit"`) means the cycle count is below the bound: you MUST
+     continue the loop, never close with a verdict.
+   - Cycle 2 and cycle 3 are FRESH reviews from scratch (fresh reviewer tasks,
+     never reused sessions). A cycle is: review wave → findings → fix wave → verify.
 2. **Reviewer wave** = one `fleet_launch` per `review_skills` entry across the
    spec slices, `kind: "scout"`, `project: {{PROJECT}}`, shared explicit
    `groupId` (`grp-{{PIPELINE_ID}}-r<c>`), `groupMode: "barrier"`,
@@ -121,3 +133,13 @@ fixers must not expand it. Do not touch anything outside `{{PROJECT}}`.
   (missing file = reviewer contract violation → treat as reviewer failure).
 - `needs_input` from a fixer: steer with the missing context or abort and
   re-plan the batch; never silently skip its findings.
+- `$H loop-next` returning `refused:"maxCycles"` (or `loop-final` returning
+  `refused:"early-exit"`) is a BOUND, not a glitch: read the JSON, write the
+  FAILED_TO_CONVERGE report (or continue the loop) exactly as the LOOP SEMANTICS
+  section says. Never bypass the helper with a hand-written `.loop.json`.
+- Frozen panes (T-019): if a reviewer/fixer pane hangs, the pane-health watchdog
+  auto-steers ('abort command + commit WIP'), then kills and relaunches it from
+  the last WIP commit; a relaunched task keeps its task id (`relaunches` record
+  in `~/.pi/fleet/<id>.json`). Treat the wake `health: <id> relaunch` as a
+  progress signal: re-read the state file and continue when the relaunched
+  child delivers its result.

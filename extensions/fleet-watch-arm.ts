@@ -112,7 +112,7 @@ function markLoaded(stateHome: string): void {
 
 function actionableLine(output: string): string {
   const lines = output.split(/\r?\n/);
-  return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
+  return lines.find((line) => /^(signal:|stale:|check:|health:|heartbeat($|:))/.test(line)) || "";
 }
 
 function classifyClose(
@@ -279,8 +279,8 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
   }
 
   function parseTaskIdFromMessage(msg: string): string | null {
-    // signal: <id>.done | signal: <id>.needs-input | signal: <id> failed | stale: <id> ...
-    const m = msg.match(/^(?:signal:|stale:)\s*([^\s.]+)(?:\.|\s|$)/);
+    // signal: <id>.done | signal: <id>.needs-input | signal: <id> failed | stale: <id> ... | health: <id> ...
+    const m = msg.match(/^(?:signal:|stale:|health:)\s*([^\s.]+)(?:\.|\s|$)/);
     return m ? m[1] : null;
   }
 
