@@ -43,11 +43,26 @@ async function getFleetOutcomes(): Promise<typeof import("./fleet-outcomes.js") 
 function getFleetOutcomesSync(): typeof import("./fleet-outcomes.js") | null {
   return _fleetOutcomes;
 }
-// T-003 — delivery posture: optional module lazy-loaded for fail soft
-let _fleetPosture: typeof import("./fleet-posture.js") | null = null;
-async function getFleetPosture(): Promise<typeof import("./fleet-posture.js") | null> {
-  if (_fleetPosture) return _fleetPosture;
-  try { _fleetPosture = await import("./fleet-posture.js"); return _fleetPosture; } catch { return null; }
+// T-003 — delivery posture: optional module lazy-loaded for fail soft.
+// T-020 — SINGLE-FLIGHT module load: cache the in-flight import PROMISE, not the
+// resolved module. The previous pattern assigned `_fleetPosture` only AFTER
+// `await import(...)`, so two fleet_launch in the same tick both saw null and
+// each fired its own import(). Under pi's extension loader (jiti,
+// core/extensions/loader.js: jiti.import) a duplicate concurrent import
+// double-instantiates fleet-posture.ts and the second copy's const bindings
+// (DEFAULT_NESTED_MAX_DEPTH, POSTURES, ...) are still in TDZ — dereferencing
+// `.getNestedMaxDepth()`/`.getPosture()`/`.isValidPosture()` throws
+// `Cannot access 'X' before initialization`. One import per session ever; on
+// failure the cache resets so the next call retries (fail soft preserved).
+let _fleetPosture: Promise<typeof import("./fleet-posture.js") | null> | null = null;
+function getFleetPosture(): Promise<typeof import("./fleet-posture.js") | null> {
+  if (!_fleetPosture) {
+    _fleetPosture = import("./fleet-posture.js").catch(() => {
+      _fleetPosture = null; // fail soft: next caller starts a fresh single-flight cycle
+      return null;
+    });
+  }
+  return _fleetPosture;
 }
 // T-002 (5b.2) durable inbox — same lazy pattern as fleet-group (fail soft)
 let _fleetInbox: typeof import("./fleet-inbox.js") | null = null;
