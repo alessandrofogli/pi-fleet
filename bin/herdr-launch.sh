@@ -25,6 +25,16 @@
 #   --gate              mechanical gate active (T-011): the launcher re-runs the anti-fraud gate itself
 #                       at task end; the child receives the GATE section in the prompt (only no-mistakes posture)
 #   --auto-pr <bool>    automatic PR on green gate (true|false, from gate.yaml). Merge NEVER automatic.
+#   --bash-timeout-s <n> per-command bash tolerance for the child (T-019): the pane-health
+#                        watchdog reports 'command timeout' when a single command has no
+#                        context growth for this many seconds. Range 120..300, default 300.
+#                        Legit long commands = explicit `timeout` wrapper in the brief or
+#                        a higher configured tolerance.
+#   --resume <taskId>    T-019 watchdog relaunch: REUSES the existing worktree (state.cwd),
+#                        re-aligns the fleet/<taskid>-* branch on the last WIP commit, opens
+#                        a FRESH pane/tab with the SAME brief and preserves the task registry
+#                        (groupId, nested, depth — untouched). The small plan lives in
+#                        <id>.relaunch (written by bin/fleet-relaunch.sh before the kill).
 #   --debug              print raw output of herdr commands
 set -u
 
@@ -71,6 +81,8 @@ while [[ $# -gt 0 ]]; do
     --parent-task-id) PARENT_TASK_ID="$2"; shift 2 ;;
     --gate) GATE_ACTIVE=1; shift ;;
     --auto-pr) AUTO_PR="$2"; shift 2 ;;
+    --bash-timeout-s) BASH_TIMEOUT_S="$2"; shift 2 ;;
+    --resume) RESUME_TASK_ID="$2"; shift 2 ;;
     --debug) FM_DEBUG=1; shift ;;
     -h|--help) sed -n '1,24p' "$0"; exit 0 ;;
     *)
@@ -80,11 +92,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -z "$TITLE" ]] && { echo "error: missing title" >&2; exit 2; }
+[[ -z "$TITLE" ]] && [[ -z "$RESUME_TASK_ID" ]] && { echo "error: missing title" >&2; exit 2; }
 if [[ "$PROJECT" == "$HOME" ]]; then
   echo "warning: no explicit --project, cwd = HOME. Pass --project <path>." >&2
 fi
-[[ -z "$BRIEF" ]] && { echo "error: missing brief" >&2; exit 2; }
+[[ -z "$BRIEF" ]] && [[ -z "$RESUME_TASK_ID" ]] && { echo "error: missing brief" >&2; exit 2; }
+# T-019: clamp the per-command bash tolerance to the 120..300s range (default 300).
+case "$BASH_TIMEOUT_S" in ''|*[!0-9]*) BASH_TIMEOUT_S=300 ;;
+  *) if [ "$BASH_TIMEOUT_S" -lt 120 ] || [ "$BASH_TIMEOUT_S" -gt 300 ]; then
+       herr "--bash-timeout-s $BASH_TIMEOUT_S out of range (120..300): falling back to 300"
+       BASH_TIMEOUT_S=300
+     fi ;;
+esac
 
 STATE_HOME="${FLEET_STATE_HOME:-$HOME/.pi/fleet}"
 mkdir -p "$STATE_HOME/tasks"
@@ -134,6 +153,84 @@ else
   BRIEF_CONTENT="$BRIEF"
 fi
 
+# ------------------------------------------------------- T-019 resume ----
+# Watchdog relaunch (--resume <taskId>): the task state json already exists
+# (state=running, groupId/nested/depth/gate untouched). We reuse the existing
+# worktree (state.cwd), re-align the fleet/<taskid>-* branch on the last WIP
+# commit (the salvage base recorded in <id>.relaunch), and open a FRESH pane/
+# tab with the SAME brief. The task registry stays consistent: this launcher
+# instance owns the pane teardown at the end and releases the worktree.
+RESUME_BASE=""
+RESUME_BRANCH=""
+RESUME_REASON=""
+RESUME_AT=""
+if [[ -n "$RESUME_TASK_ID" ]]; then
+  RESUME_STATE_JSON="$STATE_HOME/$RESUME_TASK_ID.json"
+  [[ -f "$RESUME_STATE_JSON" ]] || { herr "--resume: task state not found: $RESUME_STATE_JSON"; exit 2; }
+  TASK_ID="$RESUME_TASK_ID"
+  TITLE="$(jq -r '.title // empty' "$RESUME_STATE_JSON" 2>/dev/null)"
+  RESUME_CWD="$(jq -r '.cwd // empty' "$RESUME_STATE_JSON" 2>/dev/null)"
+  [[ -n "$RESUME_CWD" && -d "$RESUME_CWD" ]] || { herr "--resume: worktree missing: '$RESUME_CWD' (treehouse released it?)"; exit 2; }
+  [[ -d "$RESUME_CWD/.git" || -f "$RESUME_CWD/.git" ]] || { herr "--resume: not a git repo: $RESUME_CWD"; exit 2; }
+  PROJECT="$(jq -r '.project // ""' "$RESUME_STATE_JSON" 2>/dev/null)"
+  BRIEF="$(jq -r '.briefFile // empty' "$RESUME_STATE_JSON" 2>/dev/null)"
+  [[ -n "$BRIEF" && -f "$BRIEF" ]] || { herr "--resume: brief file missing: $BRIEF"; exit 2; }
+  BRIEF_CONTENT="$(cat "$BRIEF")"
+  _tm="$(jq -r '.timeoutMs // 0' "$RESUME_STATE_JSON" 2>/dev/null || echo 0)"
+  case "$_tm" in ''|*[!0-9]*) _tm=0 ;; esac
+  [[ "$_tm" -gt 0 ]] && TIMEOUT_MIN=$(( _tm / 60000 ))
+  _bt="$(jq -r '.bashTimeoutS // 0' "$RESUME_STATE_JSON" 2>/dev/null || echo 0)"
+  case "$_bt" in ''|*[!0-9]*) _bt=0 ;; esac
+  [[ "$_bt" -ge 120 && "$_bt" -le 300 ]] && BASH_TIMEOUT_S="$_bt"
+  USE_WORKTREE=0
+  TASK_CWD="$RESUME_CWD"
+  WT_PATH="$RESUME_CWD"   # final cleanup releases the (pre-existing) lease
+  # T-019: a resumed child keeps its registry identity: nested opt-in, depth and
+  # the mechanical gate are derived from the existing state, not from new flags.
+  _nested="$(jq -r '.nested // false' "$RESUME_STATE_JSON" 2>/dev/null || echo false)"
+  [[ "$_nested" == "true" ]] && NESTED=1 || NESTED=0
+  _depth="$(jq -r '.depth // 1' "$RESUME_STATE_JSON" 2>/dev/null || echo 1)"
+  case "$_depth" in ''|*[!0-9]*) _depth=1 ;; esac
+  CHILD_DEPTH="$_depth"
+  _posture="$(jq -r '.deliveryPosture // "no-mistakes"' "$RESUME_STATE_JSON" 2>/dev/null || echo no-mistakes)"
+  [[ "$_posture" == "no-mistakes" && -f "$PROJECT/gate.yaml" ]] && GATE_ACTIVE=1
+  # the relaunch plan (written by bin/fleet-relaunch.sh BEFORE the pane kill)
+  RESUME_PLAN="$STATE_HOME/$TASK_ID.relaunch"
+  if [[ -f "$RESUME_PLAN" ]]; then
+    RESUME_BASE="$(jq -r '.base // empty' "$RESUME_PLAN" 2>/dev/null)"
+    RESUME_BRANCH="$(jq -r '.branch // empty' "$RESUME_PLAN" 2>/dev/null)"
+    RESUME_REASON="$(jq -r '.reason // ""' "$RESUME_PLAN" 2>/dev/null)"
+    RESUME_AT="$(jq -r '.at // empty' "$RESUME_PLAN" 2>/dev/null)"
+  fi
+  # re-align the branch on the last WIP commit (the salvage base)
+  _cur_branch="$(git -C "$TASK_CWD" branch --show-current 2>/dev/null || true)"
+  _target="$RESUME_BRANCH"
+  if [[ -z "$_target" ]]; then
+    _target="$(git -C "$TASK_CWD" branch --list --format='%(refname:short)' "fleet/$TASK_ID-*" 2>/dev/null | head -1)"
+  fi
+  if [[ -z "$_target" ]]; then
+    _target="fleet/$TASK_ID-resume"
+    git -C "$TASK_CWD" switch -q -c "$_target" 2>/dev/null \
+      || { herr "--resume: cannot create branch $_target"; exit 2; }
+  elif [[ "$_cur_branch" != "$_target" ]]; then
+    git -C "$TASK_CWD" switch -q "$_target" 2>/dev/null \
+      || { herr "--resume: cannot switch to $_target"; exit 2; }
+  fi
+  # HEAD on a NAMED branch at the WIP base (child commits continue the lineage).
+  if [[ -n "$RESUME_BASE" ]]; then
+    git -C "$TASK_CWD" checkout -q -B "$_target" "$RESUME_BASE" 2>/dev/null \
+      || { herr "--resume: cannot align $_target on $RESUME_BASE"; exit 2; }
+  fi
+  log "resume: $TASK_ID on $_target @ ${RESUME_BASE:-HEAD} (reason: ${RESUME_REASON:-watchdog})"
+  # record the relaunch in the task registry (append-only) and consume the plan
+  if jq -e . "$RESUME_PLAN" >/dev/null 2>&1; then
+    jq --argjson rel "$(jq -c --arg at "${RESUME_AT:-$(date +%s)000}" --arg reason "$RESUME_REASON" --arg base "$RESUME_BASE" --arg branch "$_target" '{at:($at|tonumber), reason:$reason, base:$base, branch:$branch}' "$RESUME_PLAN" 2>/dev/null || echo '{}')" \
+      '.relaunches = (.relaunches // []) + [$rel]' "$RESUME_STATE_JSON" \
+      > "$RESUME_STATE_JSON.tmp" 2>/dev/null && mv "$RESUME_STATE_JSON.tmp" "$RESUME_STATE_JSON"
+  fi
+  rm -f "$RESUME_PLAN" 2>/dev/null || true
+fi
+
 # ------------------------------------------------------- 1. herdr workspace ----
 # The child runs in a "fleet" workspace DEDICATED per project: it NEVER touches the
 # captain's workspace/tab. From there it is visible ONLY in herdr's agents sidebar
@@ -149,6 +246,10 @@ TAB_ID=""
 # Agent name: herdr constraint = 1-32 chars, starts with a lowercase letter.
 # The task id (readable, long) and the agent name (short) are DELIBERATELY decoupled.
 AGENT_NAME="f-$(printf '%s' "$(slugify "$TITLE")" | cut -c1-23)-$(printf '%04d' $((RANDOM % 10000)))"
+# T-019 resume: the task id comes from --resume (stable identity for the registry).
+if [[ -n "$RESUME_TASK_ID" ]]; then
+  TASK_ID="$RESUME_TASK_ID"
+fi
 log "task: $TASK_ID — $TITLE"
 
 resolve_fleet_workspace() {
@@ -184,6 +285,11 @@ resolve_fleet_workspace() {
 # ------------------------------------------------------- 2. worktree ----
 TASK_CWD="$PROJECT"
 WT_PATH=""
+# T-019 resume: the existing worktree (state.cwd) is reused — no new lease.
+if [[ -n "$RESUME_TASK_ID" ]]; then
+  TASK_CWD="$RESUME_CWD"
+  WT_PATH="$RESUME_CWD"
+fi
 if [[ "$USE_WORKTREE" == 1 ]]; then
   WT_OUT="$(cd "$PROJECT" && treehouse get --lease --no-fetch --lease-holder "pi-fleet:$TASK_ID" 2>&1)" \
     || { herr "treehouse get failed for '$PROJECT': $WT_OUT"; exit 1; }
@@ -237,6 +343,11 @@ BRIEF_PATH="$STATE_HOME/tasks/$TASK_ID.brief.md"
 DONE_PATH="$STATE_HOME/$TASK_ID.done.json"
 NEEDS_INPUT_PATH="$STATE_HOME/$TASK_ID.needs-input.json"
 
+if [[ -n "$RESUME_TASK_ID" ]]; then
+  # T-019 resume: the registry state already exists (running, group/nested fields
+  # preserved). The brief file is already on disk. Do NOT overwrite either.
+  :
+else
 printf '%s\n' "$BRIEF_CONTENT" > "$BRIEF_PATH"
 # L3.5 group fields — empty GROUP_ID → use TASK_ID (single), GROUP_SIZE placeholder 1
 EFFECTIVE_GROUP_ID="${GROUP_ID:-$TASK_ID}"
@@ -253,6 +364,7 @@ cat > "$STATE_JSON.tmp" <<EOF
   "lastBeatAt": $(date +%s)000,
   "doneAt": null,
   "timeoutMs": $((TIMEOUT_MIN * 60000)),
+  "bashTimeoutS": ${BASH_TIMEOUT_S:-300},
   "groupId": $(jq -Rn --arg v "$EFFECTIVE_GROUP_ID" '$v'),
   "groupSize": 1,
   "groupLabel": $(jq -Rn --arg v "${GROUP_LABEL:-}" '$v'),
@@ -266,6 +378,7 @@ cat > "$STATE_JSON.tmp" <<EOF
 }
 EOF
 mv "$STATE_JSON.tmp" "$STATE_JSON"  # atomic: no mid-reads by the watcher
+fi
 log "state: $STATE_JSON"
 if [[ -n "${GROUP_ID:-}" ]]; then log "gruppo: $GROUP_ID ($GROUP_MODE)"; fi
 
@@ -344,6 +457,18 @@ if [[ "$NESTED" == "1" ]]; then
   NESTED_RULES="- YOU ARE A NESTED ORCHESTRATOR (launched with nested:true, depth ${CHILD_DEPTH:-1}): you MAY use the fleet_* tools (fleet_launch, fleet_status, fleet_peek, fleet_steer, fleet_abort) to spawn and manage YOUR OWN subtasks (review loops, pipelines). Your fleet view and targets are SCOPED to your own subtree — you can only manage tasks you launched. Depth is capped: a launch beyond the configured max (postures.json \$config.nestedMaxDepth, default 2) is denied with a clear message; treat that as a limit, not a bug. Do NOT use fleet_bootstrap / fleet_learn / fleet_captain_pref / fleet_stow (captain-only tools)."
   log "nested: orchestrator enabled (depth ${CHILD_DEPTH:-1})"
 fi
+# T-019 resume preamble: the child must know it was hard-reset and from where.
+RESUME_RULES=""
+if [[ -n "$RESUME_TASK_ID" ]]; then
+  RESUME_RULES="- RESUME NOTICE (T-019 watchdog recovery): your pane was classified hard-frozen and was killed + relaunched automatically at ${RESUME_AT:-?} (reason: ${RESUME_REASON:-frozen pane}). The branch is aligned on the last WIP commit (${RESUME_BASE:-HEAD}); a 'WIP salvage before relaunch' commit may be present (untracked files were committed for you). Continue the ORIGINAL brief: $BRIEF_PATH. In the done-marker, briefly report what state you recovered and what still remains."
+  log "resume: recovery preamble added to the child prompt"
+fi
+# T-019 runtime conventions (every task, launch or resume): per-command bash
+# tolerance + WIP hygiene. Enforcement is the external pane-health watchdog
+# (bin/fleet-watch.sh): static context for ${BASH_TIMEOUT_S}s → 'command timeout'
+# report + auto-steer; still no ack → kill + relaunch from the last WIP commit.
+RUNTIME_RULES="- RUNTIME RULES (T-019): (1) NEVER let a single bash command run unbounded — the pane-health watchdog reports 'command timeout' when a command shows no context growth for ${BASH_TIMEOUT_S}s (per-task tolerance). Wrap any command that may take longer than ~10s with an explicit \`timeout <seconds>\` wrapper, or state the configured tolerance in your brief and ack the watchdog steer if it fires (a legitimately long command is fine once acknowledged). (2) Leave NO untracked files behind: commit your work as you go (ONE COMMIT PER FILE), and before finishing/stopping commit or stash anything untracked so a kill+relaunch is lossless. (3) Commit a WIP commit right after recon. (4) Recursive commands (tests, searches, jq pipes) need a depth bound — no silent infinite loops."
+  log "runtime: bash tolerance ${BASH_TIMEOUT_S}s"
 # T-011 mechanical gate: conditional GATE section (only when --gate, i.e.
 # no-mistakes posture AND project with gate.yaml). The child owns the self-fix
 # loop (firstmate model: the worker owns run/fix). The anti-fraud is in the
@@ -379,6 +504,8 @@ Rules:
 ${SCOUT_RULES}
 ${GATE_RULES}
 ${NESTED_RULES}
+${RESUME_RULES}
+${RUNTIME_RULES}
 
 DELIVERY POSTURE: $DELIVERY_POSTURE
 Meaning:
@@ -449,6 +576,13 @@ while :; do
     set_state aborted
     close_tab
     release_worktree
+    exit 0
+  fi
+  # T-019: a .relaunch marker (written by bin/fleet-relaunch.sh BEFORE the pane
+  # kill) means the watchdog is taking over: exit WITHOUT failing the task and
+  # WITHOUT releasing the worktree — the resumed launcher (--resume) owns both.
+  if [[ -f "$STATE_HOME/$TASK_ID.relaunch" ]]; then
+    log "relaunch requested (T-019 watchdog): exiting without failing/releasing (resume owns pane+worktree)"
     exit 0
   fi
   if [[ $(date +%s) -gt $DEADLINE ]]; then
