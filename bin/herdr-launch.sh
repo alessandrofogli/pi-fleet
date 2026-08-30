@@ -99,6 +99,13 @@ if [[ "$PROJECT" == "$HOME" ]]; then
   echo "warning: no explicit --project, cwd = HOME. Pass --project <path>." >&2
 fi
 [[ -z "$BRIEF" ]] && [[ -z "$RESUME_TASK_ID" ]] && { echo "error: missing brief" >&2; exit 2; }
+
+STATE_HOME="${FLEET_STATE_HOME:-$HOME/.pi/fleet}"
+mkdir -p "$STATE_HOME/tasks"
+
+log()  { printf '[fleet] %s\n' "$*"; }
+herr() { printf '[fleet] ERROR: %s\n' "$*" >&2; }
+
 # T-019: clamp the per-command bash tolerance to the 120..300s range (default 300).
 case "$BASH_TIMEOUT_S" in ''|*[!0-9]*) BASH_TIMEOUT_S=300 ;;
   *) if [ "$BASH_TIMEOUT_S" -lt 120 ] || [ "$BASH_TIMEOUT_S" -gt 300 ]; then
@@ -106,12 +113,6 @@ case "$BASH_TIMEOUT_S" in ''|*[!0-9]*) BASH_TIMEOUT_S=300 ;;
        BASH_TIMEOUT_S=300
      fi ;;
 esac
-
-STATE_HOME="${FLEET_STATE_HOME:-$HOME/.pi/fleet}"
-mkdir -p "$STATE_HOME/tasks"
-
-log()  { printf '[fleet] %s\n' "$*"; }
-herr() { printf '[fleet] ERROR: %s\n' "$*" >&2; }
 
 # Marks failed on premature launcher exit (failed tab/agent/prompt):
 # without this the state stays 'spawning' and the task dies SILENTLY (the watcher
