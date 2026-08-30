@@ -69,3 +69,41 @@ cherry-pick -> checks green. Cycles 2-3: fresh reviewers report 0 findings
 1. Digest delivery to THIS nested session (in-env vs T-013 S6 in-process) —
    timing, whether findings files exist on disk by digest time.
 2. Worktree conflicts across reviewer/fixer waves — target: zero.
+## ⛔ BLOCKED at launch-config — fleet tools denied (nested:true missing)
+
+**Finding (evidence, file:line):** this task was launched by the captain with
+`nested` NOT set → task state `~/.pi/fleet/t-016-pilot-review-loop-su-bra-140.json`
+carries `"nested": 0`. The T-013 gate (`extensions/index.ts:706-726`,
+`sessionRole()` at `index.ts:643-656`) classifies the session as **mute** and
+EXPLICITLY denies every fleet_* tool call:
+
+- `fleet_launch` → "fleet tools are disabled for task t-016-pilot-review-loop-su-bra-140:
+  it was launched WITHOUT nested:true. Only the captain or tasks launched with
+  nested:true can use fleet_* tools (T-013 nested launch)."
+- `fleet_status` → identical denial (gate verified at runtime, in-env).
+
+So the loop (reviewer/fixer waves via fleet_launch group barrier, per the
+non-negotiable template semantics) CANNOT be started from this session. The
+pilot's core objective — validate the LIVE nested path in-env — is not
+reachable as launched. The gate behavior itself matches T-013's design exactly
+(explicit denial, "mute" role, zero regression for non-opt-in children); the
+divergence is the LAUNCH CONFIGURATION, not the machinery.
+
+**Sibling check:** t-017-pipeline-orchestrator-im-491 (same cap wave
+grp-t16t17-wave3) is ALSO `nested:0` — same block.
+
+**What already landed (usable by a relaunch):**
+- branch `fleet/016-pilot-loop` @ `fa6f2c5` (WIP recon commit, this doc),
+  based on `origin/main` @ e52afce (HEAD verified);
+- spec validated `{"valid":true}`; baseline audit = 5 BLOCKING findings;
+  checks green; full loop plan above.
+
+**Unblock options (captain):**
+1. Relaunch the pilot with `nested: true` (clean path) — the new session
+   continues from `fa6f2c5`; the loop plan + recon survive on the branch.
+2. In-place re-arm of THIS session: the gate re-reads task state on every call
+   (`fleetToolsGate()` → `ownFleetTask()` fail-soft on disk), so setting
+   `"nested": true` (+ `"depth":1`) in `~/.pi/fleet/<id>.json` re-enables the
+   tools immediately in this session, depth 1 < max 2 → launches allowed.
+3. Explicitly authorize a fallback (pi-subagents instead of fleet_launch) —
+   deviates from the brief's fleet semantics; not recommended.
