@@ -1,0 +1,56 @@
+# pi-fleet · fleet-captain.service — user unit for the mini captain (D1)
+#
+# Template — the deployed copy lives at
+#   /home/ale/.config/systemd/user/fleet-captain.service
+# (install/deploy steps in docs/mini-hardening.md). ExecStart and
+# WorkingDirectory are absolute and match the mini layout (ale@macmini).
+#
+# What this unit is:
+#   The captain is pi (a TUI) running in a tmux session `fleet`. A bare
+#   systemd unit has NO tty, so the unit's ExecStart is a small LAUNCHER
+#   (scripts/mini-captain-run.sh) that creates the detached tmux session
+#   (the tmux pty IS the captain's terminal) and then supervises pi in a
+#   while-true loop — the unit's main PID stays alive, so systemd watches
+#   the whole lifecycle and Restart=always recovers crashes of either layer.
+#
+# tmux-attach caveat: the captain still lives in tmux session `fleet`, so
+# `tmux attach -t fleet` (or `tmux capture-pane -p -t fleet`) keeps working
+# exactly as before for inspection. NEVER send-keys into the pane while the
+# captain is running a turn (single consumer).
+#
+# Provider/model: intentionally NO PI_DEFAULT_MODEL / provider env here. The
+# provider+model come from pi config on the mini
+# (~/.pi/agent/settings.json: defaultProvider=opencode-go,
+# defaultModel=deepseek-v4-flash; API key in ~/.pi/agent/auth.json, 600).
+# No secrets environment file is created (see docs/mini-hardening.md). Only
+# PATH + PI_FLEET_CAPTAIN are exported (the captain gate needs the latter
+# because cwd on the mini is /home/ale/pi-fleet, not $HOME).
+
+[Unit]
+Description=fleet-captain — pi-fleet captain (pi TUI in tmux 'fleet') on the Mac mini
+Documentation=https://github.com/alessandrofogli/pi-fleet/blob/main/docs/mini-hardening.md
+# The watcher must be up before the captain (it arms from session_start).
+After=network-online.target fleet-watch.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ale/pi-fleet
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PI_FLEET_CAPTAIN=1
+ExecStart=/home/ale/pi-fleet/scripts/mini-captain-run.sh
+Restart=always
+RestartSec=5
+
+# Clean captain stop: SIGTERM goes to the launcher only (KillMode=process);
+# the launcher's TERM trap runs `tmux kill-session -t fleet` so the captain
+# ends cleanly. We deliberately do NOT use control-group/mixed: SIGKILLing
+# the whole cgroup could take down the tmux SERVER, which would kill OTHER
+# tmux sessions of the same user. If the launcher ever hangs past
+# TimeoutStopSec and is SIGKILLed, the orphaned `fleet` session is cleaned by
+# the next start (launcher step 0 is idempotent).
+KillMode=process
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
