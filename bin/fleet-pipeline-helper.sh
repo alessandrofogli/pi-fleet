@@ -50,7 +50,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOOP_HELPER="$SCRIPT_DIR/fleet-loop-helper.sh"
 
 usage() {
-  sed -n '1,42p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 log() { printf '[fleet-pipeline-helper] %s\n' "$*" >&2; }
