@@ -1,0 +1,49 @@
+# T-018 pilot — pipeline tickets: README "Review loop / pipeline" section
+
+## scope
+Add the "Review loop / pipeline" section to README.md, in English, as a
+top-level "## Review loop / pipeline" heading placed right before the
+"## Testing" section (after the Bootstrap subsection). Length ~12-25 lines.
+The section documents the two automation workflows:
+
+1. ENTRY POINT — the two runnable brief templates: the review&fix loop
+   (templates/fleet-loop-orchestrator.brief.md) and the implementation
+   pipeline (templates/pipeline-orchestrator.brief.md), the implementing
+   skills (skills/fleet-review-loop, skills/pipeline-orchestrator,
+   skills/review-loop-protocol) and the deterministic helpers
+   (bin/fleet-loop-helper.sh, bin/fleet-pipeline-helper.sh).
+2. PREREQUISITES — nested launch (fleet_launch nested:true grants the
+   orchestrator child the fleet_* tools), the depth cap (postures.json
+   $config.nestedMaxDepth; a full pipeline + nested loop needs >= 3), review
+   skills resolvable on the reviewed project, jq.
+3. HOW TO RUN — workflow summary: plan the tickets markdown
+   (docs/pipeline-tickets.md format) -> convert to the pipeline spec
+   (bin/fleet-pipeline-helper.sh convert) -> DAG waves (deps written in the
+   tickets) -> one shipper per slice (own branch, ONE COMMIT PER FILE) ->
+   hybrid integration on the effective branch (cherry-pick, no squash) ->
+   deterministic checks (exit 0 = pass, gate-run.sh semantics) -> hook the
+   review&fix loop (3 fixed cycles, fresh reviewers each cycle, findings from
+   the state files, fixers one commit per file) -> PASS or
+   FAILED_TO_CONVERGE. Delivery stays local: no push, no PR.
+
+Also add a short cross-link line in docs/pipeline-tickets.md (near the
+introductory paragraph) pointing to the new README section.
+
+The pipeline may touch README.md and docs/pipeline-tickets.md only.
+
+## slice readme-section
+title: README "Review loop / pipeline" section (entry point + prerequisites + workflow)
+impl_skills: writing-for-agents
+review_skills: writing-for-agents
+deps:
+
+## slice tickets-crosslink
+title: Cross-link docs/pipeline-tickets.md to the new README section
+impl_skills: writing-for-agents
+review_skills: writing-for-agents
+deps:
+
+## checks
+readme-section: grep -q "Review loop / pipeline" README.md
+readme-entry-points: grep -q "fleet-loop-orchestrator.brief.md" README.md && grep -q "pipeline-orchestrator.brief.md" README.md
+tickets-crosslink: grep -q "Review loop / pipeline" docs/pipeline-tickets.md

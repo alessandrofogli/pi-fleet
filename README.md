@@ -393,6 +393,30 @@ Implementation: `extensions/fleet-bootstrap.ts` (lazy-loaded, fail-soft — same
 
 ---
 
+## Review loop / pipeline
+
+Two runnable brief templates drive the automation workflows:
+
+- **Review & fix loop** — `templates/fleet-loop-orchestrator.brief.md`
+- **Implementation pipeline** — `templates/pipeline-orchestrator.brief.md`
+
+Implementing skills: `skills/fleet-review-loop`, `skills/pipeline-orchestrator`, `skills/review-loop-protocol`. Deterministic helpers: `bin/fleet-loop-helper.sh`, `bin/fleet-pipeline-helper.sh`.
+
+### Prerequisites
+
+- **Nested launch**: the orchestrator child must get the `fleet_*` tools — launch with `fleet_launch nested:true` (without it the T-013 gate denies them).
+- **Depth cap**: `postures.json` `$config.nestedMaxDepth` (default 2) caps nesting; a full pipeline with a nested review&fix loop needs >= 3.
+- **Review skills** (`skills/review-loop-protocol` + a domain review skill) must be resolvable on the reviewed project.
+- **jq** (used by the helpers).
+
+### How to run
+
+1. Plan the tickets markdown (`docs/pipeline-tickets.md` format, deps between slices in the tickets) → convert to the pipeline spec with `bin/fleet-pipeline-helper.sh convert`.
+2. Orchestrator runs **DAG waves** (deps from the tickets): one shipper per slice, own branch, ONE COMMIT PER FILE, integrated on the effective branch by cherry-pick (no squash); deterministic checks gate it (exit 0 = pass, `bin/gate-run.sh` semantics).
+3. Hook the **review&fix loop**: 3 fixed cycles, fresh reviewers each cycle, findings from the state files, fixers one commit per file → **PASS** or **FAILED_TO_CONVERGE**.
+
+Delivery stays local: no push, no PR.
+
 ## Testing
 
 End-to-end smoke test of the base chain **launcher → pi child in the herdr pane → done-marker → state on disk**:

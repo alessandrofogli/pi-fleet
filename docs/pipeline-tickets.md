@@ -8,6 +8,10 @@ into a **pipeline spec** (YAML `pipeline.yaml` + JSON mirror
 `pipeline.spec.json`) that follows the schema in
 [`docs/pipeline-spec.md`](pipeline-spec.md) (T-014).
 
+For how to run a pipeline end-to-end (tickets -> converter -> DAG waves
+-> shippers -> hybrid integration -> checks -> review&fix loop), see
+the "Review loop / pipeline" section in the README.
+
 Relationship to the spec:
 
 - Markdown (this format) is the **source of truth** — humans plan in
