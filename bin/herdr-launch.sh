@@ -260,7 +260,7 @@ cat > "$STATE_JSON.tmp" <<EOF
   "kind": "${KIND:-ship}",
   "deliveryPosture": $(jq -Rn --arg v "${DELIVERY_POSTURE:-no-mistakes}" '$v'),
   "groupFailPolicy": "${GROUP_FAIL_POLICY:-waitAll}",
-  "nested": ${NESTED},
+  "nested": $([ "${NESTED:-0}" = "1" ] && echo true || echo false),
   "depth": ${CHILD_DEPTH:-1},
   "parentTaskId": $(jq -Rn --arg v "$PARENT_TASK_ID" '$v')
 }
