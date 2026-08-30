@@ -1,0 +1,43 @@
+# pi-fleet · fleet-watch.service — user unit for the L3 external watcher (D1)
+#
+# Template — the deployed copy lives at
+#   /home/ale/.config/systemd/user/fleet-watch.service
+# (install/deploy steps in docs/mini-hardening.md). ExecStart is absolute and
+# matches the mini layout (ale@macmini, pi-fleet clone at /home/ale/pi-fleet).
+#
+# Replaces the previous ad-hoc supervisor loop
+# (setsid `while true; do bash bin/fleet-watch.sh --interval 3 || true;
+# sleep 2; done`) with a managed unit. ExecStart is the wrapper script
+# scripts/fleet-watch-run.sh which runs EXACTLY that proven loop, so the
+# semantics are unchanged:
+#   - fleet-watch.sh exits after every actionable poll; the wrapper
+#     re-spawns it after 2s (the EXIT trap releases the singleton lock
+#     ~/.pi/fleet/.watch.lock first — no-overlap is guaranteed by the lock
+#     + self-eviction, see the runner's header).
+#   - .last-watcher-beat (epoch) is touched every poll (~3s) and is the
+#     liveness beacon the captain/arm checks.
+#   - On unit restart the lock is either released by the trap or stolen as
+#     stale (dead PID) — a single fresh watcher always results.
+#
+# EnvironmentFile: deliberately NONE — the watcher needs only POSIX tools
+# and FLEET_STATE_HOME defaults to ~/.pi/fleet. No secrets (the mini API key
+# lives in ~/.pi/agent/auth.json, 600 — never in an env file). See
+# docs/mini-hardening.md (EnvironmentFile-600-or-no-secrets decision).
+
+[Unit]
+Description=fleet-watch — pi-fleet L3 external watcher (singleton, auto-restart)
+Documentation=https://github.com/alessandrofogli/pi-fleet/blob/main/docs/mini-hardening.md
+# The watcher must be up before the captain (session_start arms through it).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ale/pi-fleet
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ale/pi-fleet/scripts/fleet-watch-run.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
