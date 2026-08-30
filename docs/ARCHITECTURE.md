@@ -39,7 +39,7 @@ L2 already covers laptop suspend (freeze → resume). L3 exists only for **Pi re
 
 1. Task running → Pi closed (crash, quit, other harness).
 2. Child finishes → writes `{id}.done.json` (or `.needs-input.json`) + updates `{id}.json` state.
-3. External watcher (`fleet-watch.sh` still alive — child of arm, survives Pi exit) classifies `done:<id>` as actionable → writes `~/.pi/fleet/.wake-queue/<ts>-done-<id>.json` + exits.
+3. External watcher (`fleet-watch.sh` still alive — child of arm, survives Pi exit) classifies `done:<id>` as actionable → writes `~/.pi/fleet/.wake-queue/<ts>-done-<id>.json` + exits. **Once per event (T-025)**: the first poll creates the per-record sentinel `.wake-done-<id>`; a persisted `{id}.done.json` is absorbed on every later poll (no hot-loop), and the sentinel is pruned as soon as the marker is consumed.
 4. Pi reopened → `fleet-watch-arm.ts` `session_start`: `drainQueue()` finds file → `sendMessage({triggerTurn:true})` → captain wakes with queued reason.
 5. Captain runs `fleet-wake-drain.sh --ack` (or tool `fleet_wake_drain_pi --ack`) to confirm.
 
@@ -57,12 +57,13 @@ Sourced library, no direct execution. Provides:
 ### `bin/fleet-watch.sh`
 Polling loop (default 3s). Singleton via `fleet-lock-lib.sh`. Classifies each poll:
 - **Actionable** (exit with reason line): `done:<id>`, `needs_input:<id>`, `failed:<id>`, `queue:<file>` (new `.wake-queue/*.json`). On exit also appends to `~/.pi/fleet/.wake-queue/<ts>-<reason>.json` for durability + updates `.watch-last-reasons` dedup.
+- **Done-wake dedup (T-025)**: `done:<id>` is queued **once per event** — mirror of the failed mechanism (`_fleet_already_queued` over `.wake-queue`) plus a per-record sentinel `.wake-done-<id>`: a persisted `{id}.done.json` never re-wakes after the first queue (the D1 hot-loop: +125 `.wake-queue` files in ~4.5 min). Every poll prunes sentinels whose `{id}.done.json` was consumed or whose audit `{id}.json` is gone, so a fresh `done` event for the same id wakes once again (delivery contract preserved). The audit record `{id}.json` is never touched.
 - **Benign** (absorb): nothing new, tasks still `running`/`spawning` with fresh beat.
 - **Health (T-019)** — frozen-pane watchdog (running panes only, started >30s):
   - *heartbeat = context growth*: herdr's per-agent `revision` (fallback: `agent read` transcript checksum). The "Working…" spinner is a session-state flag, never counted as alive.
   - context static for `min(bashTimeoutS, staleT)` → **auto-steer** in the durable inbox ("abort command + commit WIP", ack-path in the message) + immediate fire-and-forget prompt; exits `health: <id> bash-timeout|pane-stale` (a new actionable for the arm).
   - steer not acked within `killT` (default 5min) → **kill + relaunch**: `bin/fleet-relaunch.sh` salvages untracked files into the branch first (WIP base = last commit), writes `<id>.relaunch`, closes pane/tab (the launcher's own teardown), invokes `bin/herdr-launch.sh --resume`; exits `health: <id> relaunch`. Ack resets the timer (legit long commands get a configured tolerance). `needs_input`/`spawning`/`.abort`/`.relaunch` tasks are never killed. Thresholds: `FLEET_HEALTH_STALE_MIN/S`, `FLEET_HEALTH_KILL_MIN/S`, per-task `bashTimeoutS`, `FLEET_HEALTH_BASH_TIMEOUT_S`.
-- Flags: `--interval N`, `--once` (single classify, for tests).
+- Config: env-driven (`FLEET_POLL` seconds, default 3); tests drive bounded sequential passes with an isolated `FLEET_STATE_HOME` under /tmp (see `tests/smoke-done-wake-dedup.sh`).
 - Trap cleans lock on INT/TERM.
 
 ### `bin/fleet-watch-arm.sh`
