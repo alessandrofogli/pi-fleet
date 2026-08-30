@@ -53,3 +53,37 @@ With the pattern: the brief contained the 4 phases + objective/constraints/deliv
 - [ ] Delivery + explicit push/merge authorization IF needed (never implicit)
 - [ ] "Self-context: read the files yourself, if my description doesn't match start from the truth"
 - [ ] Max 1-2 known suspects, never full inventories
+
+## Child runtime conventions (T-019 — the harness enforces these)
+
+The pane-health watchdog (`bin/fleet-watch.sh`, external watcher) treats the
+child as frozen when its context stops growing, and the machine does not wait
+forever on a single command. The brief MUST therefore tell the child (the
+launcher injects the same rules in the child prompt, but the brief repeats them
+so the contract is explicit):
+
+1. **Long commands always carry an explicit `timeout`.** A single bash command
+   may not run unbounded: the per-task tolerance is `bashTimeoutS` (default
+   300s, launcher `--bash-timeout-s`, range 120..300). Wrap commands that may
+   exceed ~10s in `timeout <seconds> bash -c '...'` (or `timeout <N> <cmd>` for
+   a single command). If a command legitimately needs more time, state the
+   configured tolerance in the brief — and if the watchdog steer fires, ACK it
+   (create the `<seq>.acked` file it names) to reset the timer.
+2. **Never leave untracked files behind.** Commit work as you go (ONE COMMIT
+   PER FILE) and commit (or stash) everything untracked before finishing or
+   stopping: a kill+relaunch from the last WIP commit is only lossless when the
+   WIP is already in git.
+3. **Commit a WIP commit right after recon** (base for any relaunch).
+4. **Recursive commands need a depth bound** (tests, searches, `jq` pipes): no
+   silent infinite loops.
+
+## Recovery semantics (what the child must expect)
+
+- The watchdog's first intervention is a **steer** in the durable inbox:
+  "abort command + commit WIP". ACK it (create the ack file it names) even if
+  you were just thinking — the ack resets the kill timer.
+- If there is no ack within the kill window, the pane is **killed and
+  relaunched** from the last WIP commit (salvaging untracked files first): the
+  task keeps its task id and its branch; a `relaunches` record appears in
+  `~/.pi/fleet/<id>.json` and the relaunched child gets a RESUME NOTICE with
+  the base commit. Treat that as a checkpoint, not a failure.

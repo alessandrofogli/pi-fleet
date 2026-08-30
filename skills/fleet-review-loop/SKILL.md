@@ -293,6 +293,24 @@ STATUS: FAILED_TO_CONVERGE
 
 Do not automatically start a fourth cycle.
 
+### Mechanical bound (T-019)
+
+The 3-cycle cap is enforced by the loop-state file
+`~/.pi/fleet/<loopId>.loop.json` (`{cycle, maxCycles}`), read/updated by
+`bin/fleet-loop-helper.sh` at every cycle — never by the prompt alone:
+
+- `loop-next <loopId> <maxCycles>` — start of every cycle. A refusal
+  (`{"ok":false,"refused":"maxCycles"}`) means the bound is reached: stop,
+  do NOT open another cycle;
+- `loop-final <loopId> <maxCycles>` — gate for any terminal verdict: it
+  succeeds only when `cycle == maxCycles`. Refusing `early-exit` means the
+  loop is below the bound: continue, never close with a verdict.
+
+An orchestrator that cannot bump the bound (or cannot pass `loop-final`)
+must not continue the loop and must not write a terminal verdict: it reports
+`FAILED_TO_CONVERGE` with the reason (`maxCycles` reached / `early-exit`
+refused).
+
 ## PASS
 
 The workflow succeeds only when every configured reviewer returns:
