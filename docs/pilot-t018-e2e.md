@@ -102,3 +102,41 @@ review&fix loop hook (T-015) → converged branch — then write the README
 - `docs/pilot-t018-e2e.md` — this file (recon / plan / divergences).
 
 WIP — committed before any pipeline phase.
+
+## Live-run divergences found (turned into report findings)
+
+1. **Finder 1 — launcher JSON-boolean bug breaks the native nested path**
+   (found by the nested loop-orchestrator child, needs-input
+   `~/.pi/fleet/t-018-pilot-review-fix-loop-in-228.needs-input.json`):
+   - `bin/herdr-launch.sh:69` `--nested) NESTED=1` + `:263`
+     `"nested": ${NESTED}` → the state JSON carries `"nested": 1`
+     (NUMBER), while the T-013 gate `extensions/index.ts:720`
+     `if (t?.nested !== true)` is STRICT-boolean → the child is classed
+     `mute` and every fleet_* call is EXPLICITLY denied
+     (extensions/index.ts:720-724). The gate behaved per design; the
+     launcher serialization is the bug. Only the captain's MANUAL
+     in-place re-arm (T-016/T-018 precedent) made the nested path work
+     at all. Evidence: state files `t-016-...-140.json` `"nested": true`
+     (re-armed) vs `t-018-pilot-review-fix-loop-in-228.json` `"nested": 1`
+     (launcher-written).
+   - Remedy used in this pilot: NOT patching the child state (outside
+     cwd, captain's call) — the parent (re-armed) runs the review&fix
+     loop itself; reviewer/fixer waves are plain scout/ship tasks
+     (mute is correct for them, no nested tools needed). Depth-3
+     nested spawning was NOT exercised live.
+2. **Finder 2 — transient TDZ on two parallel fleet_launch in one tick**
+   (wave-1 shipper launch): second of two parallel `fleet_launch` calls
+   crashed `Cannot access 'DEFAULT_NESTED_MAX_DEPTH' before
+   initialization` — root cause hypothesis: `getFleetPosture()`
+   single-flight bug (`extensions/index.ts:47-51`: `_fleetPosture` is
+   assigned only AFTER `await import(...)` → two concurrent callers
+   both see null → duplicate module instantiation of fleet-posture.ts
+   → TDZ on the second copy). Retry sequential = fine (observed).
+3. **Observation — verify-after-every-wave means all checks must be green
+   at every intermediate wave** (pipeline-orchestrator phase 4.5). With
+   deps-based multi-wave pipelines the wave-1 state must already satisfy
+   the FULL check set; the chosen ticket (single parallel wave) is
+   compatible by construction. Design note, not a bug.
+4. **Observation — origin/main moved** from 7c67fa9 (brief base) to
+   f8226c0 (T-016 docs merged) during the run; shippers were pinned to
+   the exact base sha 7c67fa9, so the drift was inert.
