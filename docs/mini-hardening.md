@@ -115,8 +115,13 @@ di unit user systemd non cifra gli EnvironmentFile.
 **MAI toccati**: `tasks/*.brief.md`, `<id>.json` (record audit), `<id>.log`,
 `<id>.inbox/`, `branch-outcomes.jsonl`, `.wake-queue/` (coda wake durevole + ancora di
 dedup dei `failed`), `.watch.*`, `captain.md`/`learnings.md`.
+Nota: il watcher mantiene anche `.wake-done-<id>` — il sentinel di dedup dei done-wake
+(T-025): creato al primo wake di un `<id>.done.json`, potato automaticamente quando il
+marker viene consumato o quando il record audit `<id>.json` sparisce. Come `.wake-queue`,
+non viene toccato dal launcher (lo gestisce solo il watcher).
 Nota di sicurezza: `*.done.json` dei task REALI **non** viene rimosso — il watcher
-classifica `signal: <id>.done` sulla **presenza del file**; il wake perso sarebbe solo
+classifica `signal: <id>.done` sulla **presenza del file**, ma (da T-025) **una sola
+volta per evento** grazie al sentinel `.wake-done-<id>`; il wake perso sarebbe solo
 per un task completato mentre captain E watcher erano entrambi giù (unico caso: boot
 mini, differito); la coda `.wake-queue` + i file di stato coprono il resto.
 
@@ -165,27 +170,35 @@ come dispatch di un comando non consentito, vedi sotto) è stato **rifiutato cor
 `cmd-1788129265` → done.json `{"status":"failed","summary":"refused: command not allowed"}` — la
 catena rifiuto funziona anch'essa sotto systemd.
 
-## Lezione operativa: ciclo di vita dei marker dispatch (finding D1)
+## Lezione operativa: ciclo di vita dei marker dispatch (finding D1 → fix T-025)
 
 Osservazione sul campo durante l'e2e: finché `cmd-*.done.json` resta su disco (default
 `KEEP for audit` di dispatch-cmd.sh — `--cleanup` è un **flag di invio**, non un comando di
-pulizia per id esistenti), il watcher classifica `signal: <id>.done` a **ogni poll** e ne
-scrive una wake in `.wake-queue` ogni ~2s → **hot-loop**: +125 file in ~4,5 min per
-`cmd-1788129033.done` (seq 7→132). È un **bug genuino del watcher** (le wake `done` non hanno
-la dedup che le `failed` hanno via `_fleet_already_queued`) — NON corretto qui (D1 è solo
-config/deploy; vedi PR body, ticket proposto). Mitigazioni adottate/consigliate:
+pulizia per id esistenti), il watcher classificava `signal: <id>.done` a **ogni poll** e ne
+scriveva una wake in `.wake-queue` ogni ~2s → **hot-loop**: +125 file in ~4,5 min per
+`cmd-1788129033.done` (seq 7→132). Era un **bug genuino del watcher** (le wake `done` non
+avevano la dedup che le `failed` hanno via `_fleet_already_queued`) — **corretto in T-025**
+(vedi `tests/smoke-done-wake-dedup.sh`). Comportamento odierno:
 
-1. **Launcher captain** (a ogni start systemd) rimuove `cmd-*.done.json` +
-   `cmd-*.needs-input.json` → il flood è limitato all'uptime del captain.
-2. **Operatore**: dopo un dispatch, pulire il trio con `dispatch-cmd.sh --cleanup` in
-   occasione di un NUOVO invio, oppure a mano: `rm ~/.pi/fleet/cmd-<id>.done.json
-   ~/.pi/fleet/cmd-<id>.needs-input.json` (tenendo `<id>.json` per audit).
-3. **Consigliato (dotfiles, fuori da questo branch)**: far passare `--cleanup` di default
-   dal wrapper `hermes-dispatch.sh` — il trio non persiste mai e il flood non parte.
-4. **Auto-stabilizzante per i `failed`**: un task fallito già riportato mantiene ESATTAMENTE
-   una wake-anchor in `.wake-queue` (dedup `_fleet_already_queued`) — un solo re-wake per
-   ciclo di ack, nessun flood. Verificato sul campo: dopo il drain, `remote-aggiungi-una-nota-al-re-400`
-   ha ri-emesso una sola wake (141.json) e poi assorbe.
+1. **Dedup dei done-wake (T-025)**: il watcher emette `signal: <id>.done` **ESATTAMENTE
+   una volta per evento**. Al primo poll che vede `<id>.done.json` scrive la wake in
+   `.wake-queue` (per-record `{seq, taskId, reason}`) e crea il sentinel `.wake-done-<id>`.
+   I poll successivi, finché il marker persiste, **assorbono** (niente flood, niente
+   respawn). Il record audit `<id>.json` non viene MAI toccato.
+2. **Consumo del marker**: quando il done.json sparisce (dispatch-cmd.sh `--cleanup` dopo
+   la lettura, o launcher captain a start), il poll successivo **pota il sentinel** — un
+   NUOVO evento `done` per lo stesso id (nuovo dispatch / completamento reale) ri-sveglia
+   il captain una volta. Il contratto di consegna è preservato: wake-once per ogni evento.
+3. **`failed` invariato**: l'anchor in `.wake-queue` (`_fleet_already_queued`) resta il
+   meccanismo dei failed — un solo re-wake per ciclo di ack, nessun flood.
+4. **Igiene operativa (consigliata, non più necessaria per evitare il flood)**: dopo un
+   dispatch, `dispatch-cmd.sh --cleanup` sul prossimo invio, oppure a mano
+   `rm ~/.pi/fleet/cmd-<id>.done.json ~/.pi/fleet/cmd-<id>.needs-input.json` (tenendo
+   `<id>.json` per audit). Il launcher captain continua a pulire i marker stale a ogni
+   start (belt-and-braces per dispatch abbandonati). Per forzare un re-wake manuale di un
+   done marker persistente: `rm ~/.pi/fleet/.wake-done-<id>`.
+5. **Dotfiles (fuori da questo branch)**: far passare `--cleanup` di default dal wrapper
+   `hermes-dispatch.sh` — il trio non persiste mai.
 
 ## Cleanup eseguito (step 7 del task)
 
