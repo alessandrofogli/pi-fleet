@@ -180,6 +180,23 @@ _fleet_already_queued() {
   return 1
 }
 
+# T-025: prune done-wake sentinels (.wake-done-<id>) whose event was consumed
+# (done.json removed by --cleanup / launcher) or whose audit record <id>.json
+# is gone — keeps the sentinel set bounded to LIVE done events and guarantees a
+# FRESH done event for the same id wakes the captain once again.
+_fleet_prune_done_sentinels() {
+  local s tid
+  for s in "$STATE"/.wake-done-*; do
+    [ -e "$s" ] || continue
+    tid=${s##*/}
+    tid=${tid#.wake-done-}
+    case "$tid" in ''|*/*|*\\*) rm -f "$s" 2>/dev/null || true; continue ;; esac
+    if [ ! -f "$STATE/$tid.json" ] || [ ! -f "$STATE/$tid.done.json" ]; then
+      rm -f "$s" 2>/dev/null || true
+    fi
+  done
+}
+
 # --- main loop ---
 
 _last_heartbeat=$(date +%s 2>/dev/null || echo 0)
@@ -194,8 +211,12 @@ while :; do
     exit 0
   fi
 
+  # T-025: prune consumed done-wake sentinels once per poll (cheap, idempotent)
+  _fleet_prune_done_sentinels
+
   _actionable=""
   _taskId_found=""
+  _done_wake_id=""
   _now=$(date +%s 2>/dev/null || echo 0)
   case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
   _now_ms=$((_now * 1000))
@@ -228,10 +249,17 @@ while :; do
     # id validation (avoids path traversal)
     case "$_tid" in ''|*/*|*\\*) continue ;; esac
 
-    # 1) done marker → actionable (high priority, independent of .state)
-    if [ -f "$STATE/${_tid}.done.json" ]; then
+    # 1) done marker → actionable ONCE (high priority, independent of .state)
+    # T-025 dedup: a persisted <id>.done.json must NOT re-wake on every poll
+    # (D1 hot-loop: +125 .wake-queue files in ~4.5 min). Mirror of the failed
+    # already-queued mechanism (anchor in .wake-queue) + a per-record sentinel
+    # (.wake-done-<id>) so the done event wakes the captain exactly once even
+    # after the queue was drained; the sentinel is pruned when the done marker
+    # is consumed (--cleanup / launcher) or the audit record disappears.
+    if [ -f "$STATE/${_tid}.done.json" ] && [ ! -f "$STATE/.wake-done-$_tid" ] && ! _fleet_already_queued "$_tid"; then
       _actionable="signal: ${_tid}.done"
       _taskId_found="$_tid"
+      _done_wake_id="$_tid"
       break
     fi
     if [ -f "$STATE/${_tid}.needs-input.json" ]; then
@@ -407,6 +435,13 @@ while :; do
 
   if [ -n "$_actionable" ]; then
     _fleet_enqueue_wake "$_taskId_found" "$_actionable"
+    # T-025: mark the done event as delivered-once (sentinel). Written AFTER the
+    # enqueue so a crash between the two re-queues (dup wake) instead of losing
+    # the wake. The audit record <id>.json is never touched.
+    if [ -n "$_done_wake_id" ]; then
+      _ds="$STATE/.wake-done-$_done_wake_id"
+      printf '%s\n' "$_now" > "$_ds.tmp.$$" 2>/dev/null && mv "$_ds.tmp.$$" "$_ds" 2>/dev/null || rm -f "$_ds.tmp.$$" 2>/dev/null || true
+    fi
     # reason on stdout for arm (delivery verification), also logged to triage
     _fleet_triage_log "actionable: $_actionable (task=$_taskId_found)"
     printf '%s\n' "$_actionable"
