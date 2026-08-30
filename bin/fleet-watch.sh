@@ -342,8 +342,12 @@ while :; do
                   if [ $((_now - _p1a)) -ge "$KILL_T" ]; then
                     _relaunch_count=$((_relaunch_count + 1))
                     _write_health "$_hrev" "$_static_since" "" "" "" "$_relaunch_count"
-                    _rel_out="$(bash "$SCRIPT_DIR/fleet-relaunch.sh" "$_tid" --reason "T-019: no ack of steer #$_p1_seq (${_p1_reason:-frozen}) after ${KILL_T}s" 2>&1 || true)"
-                    _fleet_triage_log "health relaunch invoked: ${_rel_out:0:300}"
+                    # DETACHED: the relaunch runs the full launcher cycle; the watcher
+                    # must not block on it (it exits with the health reason right away).
+                    ( bash "$SCRIPT_DIR/fleet-relaunch.sh" "$_tid" \
+                        --reason "T-019: no ack of steer #$_p1_seq (${_p1_reason:-frozen}) after ${KILL_T}s" \
+                        >/dev/null 2>&1 & )
+                    _fleet_triage_log "health relaunch invoked (detached) for $_tid (relaunch#$_relaunch_count)"
                     _actionable="health: ${_tid} relaunch"
                     _taskId_found="$_tid"
                     break
@@ -370,7 +374,7 @@ while :; do
                   _seq=$((_seq + 1))
                   _ack_path="$_dir/$_seq.acked"
                   _msg="T-019 health watchdog ($_trigger): your pane has had NO context growth for ${_stale}s (heartbeat = context growth, NOT the Working spinner). ABORT the current command if any; commit ALL work now INCLUDING untracked files (ONE COMMIT PER FILE). Then ack by creating the empty file: $_ack_path . If you are running a legitimately long command, ack immediately (this resets the watchdog timer); otherwise the pane will be KILLED and relaunched from the last WIP commit."
-                  jq -nc --arg m "$_msg" --argjson at "$(_now * 1000)" --argjson seq "$_seq" \
+                  jq -nc --arg m "$_msg" --argjson at "$((_now * 1000))" --argjson seq "$_seq" \
                     '{seq:$seq, message:$m, createdAt:$at, acked:false, replays:0}' \
                     > "$_dir/$_seq.json.tmp.$$" 2>/dev/null && mv "$_dir/$_seq.json.tmp.$$" "$_dir/$_seq.json" 2>/dev/null || true
                   # immediate best-effort delivery (the captain's durable inbox re-ring also covers it)
