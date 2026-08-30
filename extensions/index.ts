@@ -10,6 +10,10 @@
  *  - fleet_attach  : moves the herdr focus onto the task pane
  *  - fleet_learn   : records a dated operational learning in learnings.md (24h dedup)
  *  - fleet_captain_pref : get/set captain preferences in captain.md / captain-shared.md
+ *  - fleet_dispatch  : processes a REMOTE command injected via the durable needs-input
+ *                      channel (dispatch-cmd.sh / Hermes bridge): status/outcomes answered
+ *                      directly, launch = a REAL task; writes <id>.done.json as the
+ *                      return channel for the remote caller (T-022)
  *  - in-process watcher: wakes the chat (sendMessage triggerTurn) when a
  *    task enters failed/needs_input (done tasks are silent, per F0 decisions)
  */
@@ -780,6 +784,155 @@ function targetScopeDenial(id: string, t: TaskStateFile | null): string | null {
     return `task ${id} is outside this nested orchestrator's subtree: only tasks launched by this task (or deeper descendants) can be managed.`;
   }
   return null;
+}
+
+// ------------------------------------------------------- dispatch (T-022) --
+// fleet_dispatch — clean single-writer entry point for REMOTE commands
+// (dispatch-cmd.sh / Hermes NL bridge). The helpers below are module-level and
+// shared with the fleet_dispatch tool; the text producers mirror the
+// fleet_status / fleet_outcomes tools' output so the captain sees IDENTICAL
+// result text regardless of entry point.
+const DISPATCH_TASK_ID_RE = /^[A-Za-z0-9_-]+$/;
+export type DispatchCommand =
+  | { kind: "fleet_status" }
+  | { kind: "fleet_outcomes" }
+  | { kind: "fleet_launch"; project: string; brief: string; title: string }
+  | { kind: "refused"; summary: string };
+
+/**
+ * Parse a remote command against the FIXED allowlist:
+ *   fleet_status | fleet_outcomes | fleet_launch <project> <brief...>
+ * Anything else (unknown verb, extra args on status/outcomes, malformed launch)
+ * → refused. Lowercase exact verbs only. The project is the FIRST token after
+ * the verb (paths with spaces are not supported — same as the CLI contract).
+ */
+export function parseDispatchCommand(command: string): DispatchCommand {
+  const line = command.trim();
+  if (line === "fleet_status") return { kind: "fleet_status" };
+  if (line === "fleet_outcomes") return { kind: "fleet_outcomes" };
+  const m = line.match(/^fleet_launch\s+(\S+)\s+([\s\S]+)$/);
+  if (m) {
+    const project = m[1].trim();
+    const brief = m[2].trim();
+    if (!project || !brief) return { kind: "refused", summary: "refused: command not allowed" };
+    return { kind: "fleet_launch", project, brief, title: dispatchTitleFromBrief(brief) };
+  }
+  return { kind: "refused", summary: "refused: command not allowed" };
+}
+
+/** Title derived per the contract: `Remote: <brief first 60 chars>` (collapsed, truncation ellipsis). */
+export function dispatchTitleFromBrief(brief: string): string {
+  const collapsed = brief.replace(/\s+/g, " ").trim();
+  const head = collapsed.length > 60
+    ? collapsed.slice(0, 59).trimEnd() + "…"
+    : collapsed;
+  return `Remote: ${head}`;
+}
+
+/**
+ * Write the dispatch done-marker `<taskId>.done.json` — atomic tmp+rename,
+ * the ONLY state file this tool writes (single-writer). The record
+ * <taskId>.json + <taskId>.needs-input.json are left untouched for audit;
+ * dispatch-cmd.sh --cleanup removes them later.
+ */
+export function writeDispatchDone(taskId: string, payload: { status: string; summary: string }): void {
+  const donePath = join(STATE_HOME, `${taskId}.done.json`);
+  const tmpPath = join(STATE_HOME, `${taskId}.done.json.tmp`);
+  writeFileSync(tmpPath, JSON.stringify(payload, null, 2) + "\n", "utf8");
+  renameSync(tmpPath, donePath);
+}
+
+/** Write the done-marker and return the uniform tool result (the summary as text). */
+export function dispatchDone(
+  taskId: string,
+  outcome: { status: string; summary: string },
+): { content: { type: "text"; text: string }[]; details: { taskId: string; status: string; summary: string; donePath: string } } {
+  writeDispatchDone(taskId, outcome);
+  const donePath = join(STATE_HOME, `${taskId}.done.json`);
+  return {
+    content: [{ type: "text", text: outcome.summary }],
+    details: { taskId, status: outcome.status, summary: outcome.summary, donePath },
+  };
+}
+
+/** Fleet-status result text, identical to the fleet_status tool's default output. */
+export function dispatchStatusText(): string {
+  const allTasks = scopedTasks();
+  let groupCounts: Map<string, { done: number; total: number }> | undefined;
+  let groupSummaries: Array<{ groupId: string; label?: string; expected: number; done: number; pendingIds: string[] }> = [];
+  try {
+    const mod = getFleetGroupSync();
+    if (mod && typeof (mod as unknown as { buildGroupSummaries?: unknown }).buildGroupSummaries === "function") {
+      const fn = (mod as unknown as { buildGroupSummaries: (tasks: unknown[]) => typeof groupSummaries }).buildGroupSummaries;
+      groupSummaries = fn(allTasks as unknown as Array<{ id: string; state: string; groupId?: string; groupSize?: number; groupLabel?: string }>);
+      groupCounts = new Map(groupSummaries.map((g) => [g.groupId, { done: g.done, total: g.expected }]));
+    } else {
+      // fallback: group by groupId counting terminal states (same as fleet_status)
+      const byGroup = new Map<string, TaskStateFile[]>();
+      for (const t of allTasks) {
+        if (!t.groupId || (t.groupSize ?? 1) <= 1) continue;
+        if (!byGroup.has(t.groupId)) byGroup.set(t.groupId, []);
+        byGroup.get(t.groupId)!.push(t);
+      }
+      for (const [gid, members] of byGroup) {
+        const expected = Math.max(members[0]?.groupSize ?? members.length, members.length);
+        const done = members.filter((m) => isTerminalStateWake(m.state)).length;
+        const pendingIds = members.filter((m) => !isTerminalStateWake(m.state)).map((m) => m.id);
+        groupSummaries.push({ groupId: gid, label: members[0]?.groupLabel, expected, done, pendingIds });
+      }
+      groupCounts = new Map(groupSummaries.map((g) => [g.groupId, { done: g.done, total: g.expected }]));
+    }
+  } catch { /* fail soft, same as fleet_status */ }
+  const tasks = allTasks.slice(0, 30);
+  const hasGroups = tasks.some((t) => t.groupId && (t.groupSize ?? 1) > 1);
+  if (hasGroups) {
+    // output grouped by group (same as fleet_status' default path)
+    const byGroup = new Map<string, TaskStateFile[]>();
+    const singles: TaskStateFile[] = [];
+    for (const t of tasks) {
+      if (t.groupId && (t.groupSize ?? 1) > 1) {
+        if (!byGroup.has(t.groupId)) byGroup.set(t.groupId, []);
+        byGroup.get(t.groupId)!.push(t);
+      } else singles.push(t);
+    }
+    const lines: string[] = [];
+    for (const [gid, members] of byGroup) {
+      const g = groupSummaries.find((x) => x.groupId === gid);
+      const label = g?.label ? ` (${g.label})` : "";
+      const prog = g ? `${g.done}/${g.expected}` : `${members.length}`;
+      lines.push(`**Group ${shortGroupId(gid)}${label} — ${prog} complete:**`);
+      for (const m of members) lines.push(`  ${formatTaskLine(m, groupCounts)}`);
+    }
+    if (singles.length) {
+      lines.push(`**Singles:**`);
+      for (const s of singles) lines.push(`  ${formatTaskLine(s, groupCounts)}`);
+    }
+    return `**pi-fleet fleet (${tasks.length})**:\n${lines.join("\n")}\n\nStructured details in details.`;
+  }
+  const lines = tasks.length ? tasks.map((t) => formatTaskLine(t, groupCounts)) : ["(no tasks)"];
+  return `**pi-fleet fleet (${tasks.length})**:\n${lines.join("\n")}\n\nStructured details in details.`;
+}
+
+/** Branch-outcomes result text, identical to the fleet_outcomes tool's readable list (default limit 20). */
+export function dispatchOutcomesText(): string {
+  const mod = getFleetOutcomesSync();
+  if (!mod) return "fleet_outcomes: outcomes module unavailable (lazy load failed).";
+  const file = mod.outcomesFile(STATE_HOME);
+  const rows = mod.queryOutcomes(STATE_HOME, { limit: 20 });
+  const lines = rows.map((row) => {
+    try {
+      const o = JSON.parse(row) as { ts?: number; taskId?: string; verdict?: string; summary?: string; changedFiles?: unknown[] };
+      const sum = (o.summary ?? "").replace(/\s+/g, " ").trim();
+      const s = sum.length > 200 ? sum.slice(0, 197) + "…" : sum;
+      const files = Array.isArray(o.changedFiles) && o.changedFiles.length ? ` (${o.changedFiles.length} files)` : "";
+      return `- ${o.ts ?? "?"} · ${o.taskId ?? "?"} [${o.verdict ?? "?"}]${files} — ${s || "(no summary)"}`;
+    } catch {
+      return `- (unparseable line) ${row.slice(0, 200)}`;
+    }
+  });
+  return rows.length
+    ? `**branch-outcomes registry (${rows.length} rows)** — ${file}:\n${lines.join("\n")}`
+    : `(no entries in the branch-outcomes registry) — ${file}`;
 }
 
 export default function piFleetExtension(pi: ExtensionAPI): void {
@@ -1558,6 +1711,141 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         const text = `fleet_stow failed: ${e instanceof Error ? e.message : String(e)}`;
         return { content: [{ type: "text", text }], details };
       }
+    },
+  });
+
+  // --- fleet_dispatch (T-022) — remote command entry point (Hermes NL bridge) ---
+  pi.registerTool({
+    name: "fleet_dispatch",
+    label: "Fleet Dispatch",
+    description:
+      "Processes a REMOTE command injected via the durable needs-input channel (dispatch-cmd.sh on the personal remote / Hermes NL bridge): the watcher wakes the captain with 'signal: <id>.needs-input', the captain calls this tool, which executes the command with the EXISTING fleet capabilities (fleet_status / fleet_outcomes answered directly; fleet_launch = a REAL task) and writes STATE_HOME/<id>.done.json as the return channel for the remote caller. Fixed allowlist: 'fleet_status' | 'fleet_outcomes' | 'fleet_launch <project> <brief...>' (project = absolute path, ~/path or short name if FLEET_PROJECTS_DIR is set; brief = rest of the line; title derived as 'Remote: <brief first 60 chars>'). Unknown/malformed commands are REFUSED (done.json status failed, summary 'refused: command not allowed'). The record <id>.json + <id>.needs-input.json are kept for audit (dispatch-cmd.sh --cleanup removes them later).",
+    promptSnippet: "Process a REMOTE command injected via the dispatch channel (needs-input wake)",
+    promptGuidelines: [
+      "When the watcher reports 'signal: <id>.needs-input' for a dispatch record (id matches cmd-*, kind 'dispatch'), read the question from STATE_HOME/<id>.needs-input.json and call fleet_dispatch with taskId=<id> and command=<question>. Do NOT treat cmd-* records as stray tasks / abort them: they are REMOTE COMMANDS to execute (the old 'abort on sight' behavior is wrong for them).",
+      "fleet_launch via dispatch: project is required (absolute path, ~/path, or short name if FLEET_PROJECTS_DIR is set); brief = the rest of the line. Worktree stays ON; posture/gate/model semantics are identical to a normal fleet_launch.",
+      "After fleet_dispatch returns, report the summary to the user. Do NOT poll fleet_status/fleet_peek to check a dispatched launch: the launched task runs detached with its own lifecycle and wake, like any normal fleet_launch.",
+      "If the watcher later reports 'signal: <cmd-id>.done' for a dispatch record you already handled with fleet_dispatch, it is just the completion echo (dispatch-cmd.sh has not run --cleanup yet): acknowledge the summary and move on — do NOT re-execute the command.",
+    ],
+    parameters: Type.Object({
+      taskId: Type.String({ description: "Dispatch record id: the '<id>.json' + '<id>.needs-input.json' pair written by dispatch-cmd.sh. Must match ^[A-Za-z0-9_-]+$ (path-traversal guard). The done-marker is written to STATE_HOME/<id>.done.json." }),
+      command: Type.String({ description: "Remote command — fixed allowlist: 'fleet_status' | 'fleet_outcomes' | 'fleet_launch <project> <brief...>' (project = absolute path, ~/path or short name; brief = the rest of the line). Anything else is refused." }),
+    }),
+    async execute(_toolCallId: string, params: { taskId: string; command: string }, _signal?: unknown, _onUpdate?: unknown, ctx?: { model?: { id?: string; provider?: string } }) {
+      // T-013: only the captain or a nested-opt-in child may use the fleet tools
+      const gate = fleetToolsGate();
+      if (!gate.ok) return gateDenial(gate, "fleet_dispatch");
+      const { taskId, command } = params;
+      // --- 1. validate the taskId (defense: only act on records under STATE_HOME;
+      // never interpret it as a path / follow symlinks) ---
+      if (!DISPATCH_TASK_ID_RE.test(taskId)) {
+        const text = `fleet_dispatch: invalid taskId '${taskId}' — must match ^[A-Za-z0-9_-]+$ (path-traversal guard). Nothing written.`;
+        return {
+          content: [{ type: "text", text }],
+          details: { taskId, command, status: "rejected", reason: "invalid-taskId" },
+        };
+      }
+      // --- 2. parse the command against the FIXED allowlist ---
+      const parsed = parseDispatchCommand(command);
+      if (parsed.kind === "refused") {
+        return dispatchDone(taskId, { status: "failed", summary: parsed.summary });
+      }
+      // --- 3. execute with the EXISTING capabilities ---
+      let outcome: { status: string; summary: string };
+      if (parsed.kind === "fleet_status") {
+        await getFleetGroup(); // ensure the group module is loaded (sync getter below)
+        outcome = { status: "done", summary: dispatchStatusText() };
+      } else if (parsed.kind === "fleet_outcomes") {
+        await getFleetOutcomes(); // ensure the outcomes module is loaded (sync getter below)
+        outcome = { status: "done", summary: dispatchOutcomesText() };
+      } else {
+        // fleet_launch <project> <brief...>: resolve the project EXACTLY like
+        // the fleet_launch tool (reuse resolveProject — same required-project
+        // semantics; reference: resolveProject(), extensions/index.ts:216).
+        const resolved = resolveProject(parsed.project);
+        if (!resolved.ok) {
+          // syntactically allowlisted but the project does not resolve: fail
+          // with the specific reason instead of the generic refusal and do NOT
+          // spawn (same behavior as fleet_launch rejecting an unresolvable project).
+          outcome = { status: "failed", summary: `fleet_launch refused: ${resolved.error}` };
+        } else {
+          const project = resolved.path;
+          // posture: param > postures.json config > default no-mistakes (T-003),
+          // exactly like fleet_launch (extensions/index.ts:1012-1016). Remote dispatch
+          // sends no posture param → config/default only.
+          const postureMod = await getFleetPosture();
+          let posture = postureMod?.getPosture(project) ?? "no-mistakes";
+          if (!(postureMod?.isValidPosture(posture) ?? false)) posture = "no-mistakes";
+          const title = dispatchTitleFromBrief(parsed.brief);
+          const id = `${slugify(title) || "task"}-${Math.floor(Math.random() * 1000)}`;
+          const briefPath = join(TASKS_DIR, `${id}.brief.md`);
+          writeFileSync(briefPath, parsed.brief);
+          // task record: same shape as fleet_launch's (spawning, worktree default ON,
+          // timeout 360min, kind ship, groupId fresh — the dispatch launch is
+          // intentionally NOT batched into a captain-side group).
+          const task: TaskStateFile = {
+            id,
+            title,
+            project,
+            state: "spawning",
+            startedAt: Date.now(),
+            lastBeatAt: Date.now(),
+            doneAt: null,
+            timeoutMs: 360 * 60000,
+            groupId: `grp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+            groupSize: 1,
+            kind: "ship",
+            deliveryPosture: posture,
+            nested: false,
+            depth: 1,
+          };
+          writeTask(task);
+          const launchParams: FleetLaunchParams = {
+            title,
+            brief: parsed.brief,
+            project,
+            deliveryPosture: posture,
+            groupId: task.groupId,
+          };
+          // T-011 gate: active ONLY when posture no-mistakes AND gate.yaml exists
+          // (identical to fleet_launch, extensions/index.ts:1073-1085). autoPr from gate.yaml.
+          const gateYamlPath = join(project, "gate.yaml");
+          if (posture === "no-mistakes" && existsSync(gateYamlPath)) {
+            launchParams.gate = true;
+            launchParams.autoPr = false;
+            try {
+              const raw = readFileSync(gateYamlPath, "utf8");
+              const m = raw.match(/^\s*autoPr\s*:\s*(true|false)\s*$/m);
+              if (m?.[1] === "true") launchParams.autoPr = true;
+            } catch { /* unreadable gate.yaml → autoPr false (fail-open on the gate) */ }
+          }
+          // model inheritance identical to fleet_launch (extensions/index.ts:1091-1103):
+          // composition ALWAYS 'provider/id' (never the bare id), ctx.model wins,
+          // then PI_DEFAULT_MODEL, otherwise no --model (launcher fallback chain).
+          let effectiveModel: string | undefined;
+          if (ctx?.model?.id) {
+            const provider = ctx.model.provider || process.env.PI_PROVIDER;
+            if (provider) effectiveModel = `${provider}/${ctx.model.id}`;
+          }
+          effectiveModel = effectiveModel ?? process.env.PI_DEFAULT_MODEL;
+          if (effectiveModel) launchParams.model = effectiveModel;
+          // spawn bin/herdr-launch.sh exactly like fleet_launch does (spawnLauncher,
+          // extensions/index.ts:302-336).
+          const res = spawnLauncher(id, title, briefPath, launchParams);
+          if (!res.ok) {
+            task.state = "failed";
+            writeTask(task);
+            outcome = { status: "failed", summary: `fleet_launch failed: ${res.error}` };
+          } else {
+            outcome = {
+              status: "done",
+              summary: `launched task ${id} (project ${project}); follow-up via fleet_status/fleet_outcomes`,
+            };
+          }
+        }
+      }
+      // --- 4. write the dispatch done-marker (atomic tmp+rename) + return ---
+      return dispatchDone(taskId, outcome);
     },
   });
 

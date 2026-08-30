@@ -75,7 +75,7 @@ pi install git:github.com/alessandrofogli/pi-fleet   # no clone needed, run from
 # once a release tag exists you can pin it: pi install git:github.com/alessandrofogli/pi-fleet@<tag>
 ```
 
-The package ships the **13 `fleet_*` extension tools** and the **`fleet-brief` skill** (the package `skills/` directory is loaded automatically). `AGENTS.md` and the subagent config are written by the setup script below.
+The package ships the **14 `fleet_*` extension tools** and the **`fleet-brief` skill** (the package `skills/` directory is loaded automatically). `AGENTS.md` and the subagent config are written by the setup script below.
 
 ### 2. Run the setup script
 
@@ -242,7 +242,7 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 
 ### Manual commands (extension tools)
 
-13 `fleet_*` tools in total: 12 registered in `extensions/index.ts` (`fleet_launch`, `fleet_status`, `fleet_outcomes`, `fleet_peek`, `fleet_steer`, `fleet_posture`, `fleet_abort`, `fleet_attach`, `fleet_bootstrap`, `fleet_learn`, `fleet_captain_pref`, `fleet_stow`) plus `fleet_watch_arm_pi` in `extensions/fleet-watch-arm.ts`.
+14 `fleet_*` tools in total: 13 registered in `extensions/index.ts` (`fleet_launch`, `fleet_status`, `fleet_outcomes`, `fleet_peek`, `fleet_steer`, `fleet_posture`, `fleet_abort`, `fleet_attach`, `fleet_bootstrap`, `fleet_learn`, `fleet_captain_pref`, `fleet_stow`, `fleet_dispatch`) plus `fleet_watch_arm_pi` in `extensions/fleet-watch-arm.ts`.
 
 | Tool | What it does |
 |---|---|
@@ -258,6 +258,7 @@ do a deep check of the LLM models in my-app? and in parallel check the database 
 | `fleet_learn` | Record an operational learning in `learnings.md` (`title`, `fact`, `implication?`) |
 | `fleet_captain_pref` | Get/set a captain preference (`action`, `key`, `value?` per set, `shared?`) |
 | `fleet_stow` | Memory pruning pass (`dryRun?`, `verbose?`); stale entries refreshed or archived, dedup, optional budget — see *Memories: pruning* |
+| `fleet_dispatch` | Process a REMOTE command injected via the needs-input channel (`taskId`, `command` from the fixed allowlist `fleet_status` / `fleet_outcomes` / `fleet_launch <project> <brief...>`); writes `<id>.done.json` as the return channel — see *Remote dispatch* below |
 | `fleet_watch_arm_pi` | Start the first watcher cycle or repair a cycle reported missing/failed/unhealthy (re-arming is otherwise automatic) |
 
 #### Scout tasks (investigation-only)
@@ -378,6 +379,18 @@ Use `immediate` for fail-fast: when an error makes the other group tasks useless
 
 > Note: the policy concerns ONLY `failed`. The `done`/`aborted` stay `waitAll` (buffered) even with `immediate`; `needs_input` keeps breaking the barrier and waking immediately in both cases.
 
+### Remote dispatch (Hermes bridge)
+
+`fleet_dispatch` is the captain-side entry point for **remote commands** injected
+by `dispatch-cmd.sh` (Hermes NL bridge, Mac mini) through the durable
+needs-input channel: `signal: <id>.needs-input` wake → the captain calls
+`fleet_dispatch(taskId, command)` → the command runs with the existing
+capabilities (`fleet_status` / `fleet_outcomes` answered directly;
+`fleet_launch <project> <brief...>` = a REAL task) → `<id>.done.json` is written
+as the return channel, read by `dispatch-cmd.sh`. Fixed allowlist; unknown
+commands are refused, never executed. Full contract + deploy notes:
+`docs/fleet-dispatch.md`.
+
 ### Bootstrap
 
 At captain session start (and on demand via the `fleet_bootstrap` tool) pi-fleet runs a best-effort, **zero-config** health pass — it never blocks startup and never installs anything:
@@ -490,7 +503,7 @@ Both run entirely in `/tmp` scratch (state, repo, fakes) and never touch
 
 ### M2 — `extensions/index.ts` (pi extension)
 
-- 13 `fleet_*` tools (see *Usage → Manual commands* for the full list); `fleet_launch` spawns the launcher **detached** via `spawn("bash", [...], { detached: true })` + `unref` (survives chat abort; `python` is not involved — it only appears as a prerequisite check in `bin/setup-fleet.sh`)
+- 14 `fleet_*` tools (see *Usage → Manual commands* for the full list); `fleet_launch` spawns the launcher **detached** via `spawn("bash", [...], { detached: true })` + `unref` (survives chat abort; `python` is not involved — it only appears as a prerequisite check in `bin/setup-fleet.sh`)
 - **Bootstrap**: at `session_start` (captain only) checks tools, cleans stale state, prints a fleet digest — `extensions/fleet-bootstrap.ts`, lazy-loaded and fail-soft
 - **Watcher** (3s poll) on state transitions:
   - every terminal transition (`done`, `failed`, `needs_input`) → `fleet_notice` with `display: false` + `deliverAs: followUp` **and** `triggerTurn: true` — the raw message is hidden and the main agent synthesizes the report for you; delivery never interrupts an active turn
