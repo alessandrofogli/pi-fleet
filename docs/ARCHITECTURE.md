@@ -58,6 +58,10 @@ Sourced library, no direct execution. Provides:
 Polling loop (default 3s). Singleton via `fleet-lock-lib.sh`. Classifies each poll:
 - **Actionable** (exit with reason line): `done:<id>`, `needs_input:<id>`, `failed:<id>`, `queue:<file>` (new `.wake-queue/*.json`). On exit also appends to `~/.pi/fleet/.wake-queue/<ts>-<reason>.json` for durability + updates `.watch-last-reasons` dedup.
 - **Benign** (absorb): nothing new, tasks still `running`/`spawning` with fresh beat.
+- **Health (T-019)** — frozen-pane watchdog (running panes only, started >30s):
+  - *heartbeat = context growth*: herdr's per-agent `revision` (fallback: `agent read` transcript checksum). The "Working…" spinner is a session-state flag, never counted as alive.
+  - context static for `min(bashTimeoutS, staleT)` → **auto-steer** in the durable inbox ("abort command + commit WIP", ack-path in the message) + immediate fire-and-forget prompt; exits `health: <id> bash-timeout|pane-stale` (a new actionable for the arm).
+  - steer not acked within `killT` (default 5min) → **kill + relaunch**: `bin/fleet-relaunch.sh` salvages untracked files into the branch first (WIP base = last commit), writes `<id>.relaunch`, closes pane/tab (the launcher's own teardown), invokes `bin/herdr-launch.sh --resume`; exits `health: <id> relaunch`. Ack resets the timer (legit long commands get a configured tolerance). `needs_input`/`spawning`/`.abort`/`.relaunch` tasks are never killed. Thresholds: `FLEET_HEALTH_STALE_MIN/S`, `FLEET_HEALTH_KILL_MIN/S`, per-task `bashTimeoutS`, `FLEET_HEALTH_BASH_TIMEOUT_S`.
 - Flags: `--interval N`, `--once` (single classify, for tests).
 - Trap cleans lock on INT/TERM.
 
@@ -76,6 +80,20 @@ Durable queue consumer. Reads `~/.pi/fleet/.wake-queue/*.json` (excludes `.keep`
 - `--json` → `{"count":N,"files":[...]}`.
 - `--ack` → remove after printing (acknowledge). `--dry-run` suppresses removal.
 - Called by extension at `session_start` to surface wakes from Pi-closed interval.
+
+### `bin/fleet-relaunch.sh` (T-019)
+Standardized frozen-pane recovery, invoked detached by the watchdog at kill time (or manually):
+1. **salvage** untracked/modified files onto the `fleet/<taskid>-*` branch FIRST (`chore(recovery): WIP salvage before relaunch (T-019)`) — relaunch base = last WIP commit, lossless;
+2. **mark** `<id>.relaunch` BEFORE closing the pane (the original launcher, if alive, exits 0 on it without failing the task or releasing the worktree);
+3. **kill** pane/tab with the launcher's own teardown (idempotent);
+4. **resume** via `bin/herdr-launch.sh --resume <taskId>` (fresh pane, same brief, registry identity preserved).
+`--dry-run` prints the plan JSON; `FLEET_RELAUNCH_LAUNCHER` allows tests to stub the launcher; PATH may shadow `herdr` for fixtures.
+
+### `bin/herdr-launch.sh --resume` (T-019)
+Resume mode: reuses the existing worktree (`state.cwd`, no new lease), re-aligns the branch on the WIP base from the `.relaunch` plan (named branch, `relaunches[]` appended to the state), rebuilds the same CHILD_PROMPT plus a RESUME NOTICE, and preserves `groupId`/`nested`/`depth`/gate from the existing registry state. The resumed launcher owns the final pane teardown and worktree release.
+
+### Loop bound (T-019)
+`bin/fleet-loop-helper.sh` gains `loop-init/loop-next/loop-final/loop-state`: the mechanical cycle counter `~/.pi/fleet/<loop>.loop.json` (`{cycle, maxCycles}`) is read/updated by the helper every cycle; `loop-next` REFUSES (exit 1, `refused:"maxCycles"`) beyond the bound and `loop-final` refuses any terminal verdict before `cycle == maxCycles` (`refused:"early-exit"`). The orchestrator template (`templates/fleet-loop-orchestrator.brief.md`) requires both calls, so the 3-cycle contract is machine-enforced, not prompt-only.
 
 ### `extensions/fleet-watch-arm.ts`
 Lifecycle bridge. Captain-only (`cwd==HOME` or `PI_FLEET_CAPTAIN=1`).
@@ -200,10 +218,14 @@ A batch of N tasks launched in the same message → shared `groupId`, a single b
 ├── .watch-seen-queue               # dedup: already-surfaced queue files
 ├── .watch-arm.log                  # arm/watcher stdout/stderr (nohup)
 ├── .watch-cycle-exits.log          # (firstmate parity, optional — not yet in MVP)
+├── .health/                        # T-019 pane-health watchdog state
+│   └── <id>.last                   # {rev, staticSince, p1Seq, p1At, p1Reason, relaunchCount}
 ├── <id>.json                       # task state file (see below)
 ├── <id>.done.json                  # child done marker (transient, consumed)
 ├── <id>.needs-input.json           # child needs_input marker
 ├── <id>.abort                      # abort signal (timestamp)
+├── <id>.relaunch                   # T-019 relaunch plan {at, reason, base, branch} (transient)
+├── <loop>.loop.json                # T-019 review-loop bound {cycle, maxCycles} (read/updated by the helper)
 ├── <id>.log                        # launcher log
 ├── <id>.bad                        # parse-failed state file (quarantined)
 ├── <id>.inbox/                     # durable steer: messages <seq>.json + ack markers + handled/
@@ -224,6 +246,8 @@ A batch of N tasks launched in the same message → shared `groupId`, a single b
   "lastBeatAt": 1724800005000,
   "doneAt": null,
   "timeoutMs": 21600000,
+  "bashTimeoutS": 300,        // T-019 per-command bash tolerance (120..300), watchdog trigger
+  "relaunches": [],           // T-019 append-only recovery records {at, reason, base, branch}
   "paneId": "pane-uuid",
   "tabId": "tab-uuid",     // dedicated tab in the fleet workspace (never empty; never the captain's tab)
   "workspaceId": "ws-uuid",
@@ -249,7 +273,7 @@ A batch of N tasks launched in the same message → shared `groupId`, a single b
 | Firstmate | pi-fleet L3 |
 |---|---|
 | `state/` + `config/` + `FM_HOME` per home, secondmate homes | Single `~/.pi/fleet/` (global), no secondmate |
-| `bin/fm-watch.sh` 1000+ lines: no-verb/provably-working, wedge timer, escalation `demand-deep-inspection`, afk mode, authenticated external checks, inbox ladder, secondmate stall | `fleet-watch.sh` ~130 lines: done/failed/needs_input/queue only; no wedge, no afk, no inbox ladder, no external checks |
+| `bin/fm-watch.sh` 1000+ lines: no-verb/provably-working, wedge timer, escalation `demand-deep-inspection`, afk mode, authenticated external checks, inbox ladder, secondmate stall | `fleet-watch.sh`: done/failed/needs_input/queue + **T-019 pane-health watchdog** (context-growth heartbeat, bash-timeout trigger, steer → kill → relaunch ladder); no wedge/afk/external checks |
 | `bin/fm-watch-arm.sh` with cycle ledger `.watch-cycle-exits.log`, identity-bound delivery, `fm-wake-lib.sh` etc. | `fleet-watch-arm.sh` ~170 lines: lock+beat verify, nohup fork, race-win attach, no ledger |
 | `bin/fm-wake-drain.sh` with per-actor consume, `ELIGIBLE_ROWS_FILE` branch dispatch, `fm-lease-lib.sh` | `fleet-wake-drain.sh` ~95 lines: flat file list, no per-actor scoping |
 | `.pi/extensions/fm-primary-pi-watch.ts` with generation, child handle, retry, calm visibility, branch dispatch | `fleet-watch-arm.ts` ~200 lines: generation, fire-and-verify arm, queue drain, retry backoff, captain gate |
