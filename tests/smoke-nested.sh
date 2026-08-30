@@ -18,6 +18,10 @@
 #   S6 watcher in child   → fleet_notice wake delivered to the child session for
 #                          its own subtree + GROUP DIGEST (barrier wave) delivered
 #                          with the child's groupId; sibling tasks do NOT wake it
+#   S7 T-020 single-flight→ two fleet_launch in the SAME tick (shared groupId) both
+#                          start (no TDZ on getFleetPosture, no retry needed); the
+#                          launcher is invoked for both, and when both complete the
+#                          barrier delivers EXACTLY ONE group digest
 #
 # Isolation: FLEET_STATE_HOME per scenario points to /tmp/fleet-nested-state-*;
 # the launcher binary is MOCKED (.tmp/smoke-out/bin/herdr-launch.sh) so no real
@@ -335,6 +339,55 @@ switch (SCENARIO) {
     break;
   }
 
+  // ─────────────────── T-020: concurrent same-tick launches ────────────────
+  // Regression: two fleet_launch in the SAME tick with a shared groupId (the
+  // Wave 3/4 pattern). Pre-fix, concurrent getFleetPosture() calls each fired
+  // their own import() and the second crash landed with
+  // `Cannot access 'DEFAULT_NESTED_MAX_DEPTH' before initialization` (jiti
+  // loader double-instantiation). Single-flight must make both resolve.
+  case "S7": {
+    const grpId = "grp-t020-a1b2c3";
+    const livePane = process.env.HERDR_PANE_ID || "w0:p0";
+    // fire BOTH executes in the same tick, without awaiting between them
+    const pA = pi.tools.get("fleet_launch").execute("t", { title: "t020-a", brief: "b", project: PROJ, groupId: grpId, groupLabel: "T020" }, undefined, undefined, { model: { id: "m", provider: "p" } });
+    const pB = pi.tools.get("fleet_launch").execute("t", { title: "t020-b", brief: "b", project: PROJ, groupId: grpId, groupLabel: "T020" }, undefined, undefined, { model: { id: "m", provider: "p" } });
+    const [ra, rb] = await Promise.allSettled([pA, pB]);
+    check("t020: BOTH same-tick launches resolve (no TDZ crash)", ra.status === "fulfilled" && rb.status === "fulfilled",
+      ra.status === "fulfilled" ? "" : String(ra.reason?.message ?? ra.reason));
+    const da = ra.status === "fulfilled" ? ra.value?.details : null;
+    const db = rb.status === "fulfilled" ? rb.value?.details : null;
+    check("t020: both spawning (neither rejected)", da?.state === "spawning" && db?.state === "spawning", `${da?.state}/${db?.state}`);
+    const idA = da?.taskId, idB = db?.taskId;
+    await sleep(400); // let the (mocked, detached) launchers record their stdout
+    // each task has its OWN spawnLauncher log (STATE_HOME/<id>.log, append) —
+    // the mocked launcher prints 'mocked-launcher' to it; a TDZ crash on the
+    // second execute would abort BEFORE spawnLauncher → only one log would exist
+    const logA = idA && existsSync(join(STATE, `${idA}.log`)) ? readFileSync(join(STATE, `${idA}.log`), "utf8") : "";
+    const logB = idB && existsSync(join(STATE, `${idB}.log`)) ? readFileSync(join(STATE, `${idB}.log`), "utf8") : "";
+    check("t020: launcher invoked for BOTH tasks (no retry needed)", logA.includes("mocked-launcher") && logB.includes("mocked-launcher"), `${idA}:log=${!!logA} ${idB}:log=${!!logB}`);
+    const tA = readTask(idA), tB = readTask(idB);
+    check("t020: both tasks share the same groupId", tA?.groupId === grpId && tB?.groupId === grpId, `${tA?.groupId}/${tB?.groupId}`);
+
+    // barrier digest delivery for the same-tick pair: borrow the live pane id so
+    // the session_start reconcile leaves the tasks alone; then complete both.
+    writeTask({ ...readTask(idA), paneId: livePane });
+    writeTask({ ...readTask(idB), paneId: livePane });
+    const sessionStarts = pi.hooks.get("session_start") ?? [];
+    for (const h of sessionStarts) h();
+    await sleep(2500); // reconcile + watcher seed (POLL_MS = 3000)
+    writeTask({ ...readTask(idA), state: "done" });
+    await sleep(3600);
+    check("t020: first member done does NOT wake (barrier buffered)", pi.messages.length === 0, `messages=${pi.messages.length}`);
+    writeTask({ ...readTask(idB), state: "done" });
+    await sleep(3600);
+    const digest = pi.messages.find((m) => m.msg.details?.groupId === grpId);
+    check("t020: barrier delivered EXACTLY ONE digest for the shared group", pi.messages.length === 1 && !!digest,
+      pi.messages.map((m) => m.msg.details?.groupId ?? m.msg.details?.fleetTaskId ?? "?").join(",") || "(none)");
+    check("t020: digest carries the shared groupId + both wave members", digest?.msg.details?.groupId === grpId && digest?.msg.details?.results?.length === 2,
+      `results=${digest?.msg.details?.results?.length}`);
+    break;
+  }
+
   default:
     console.error(`unknown scenario ${SCENARIO}`);
     process.exit(3);
@@ -362,7 +415,7 @@ run_scenario() {
   ) 2>&1 | tee "$state/out.txt" | tail -1 > "$VERDICT_DIR/$name.txt"
 }
 
-log "[3/6] running scenarios S1..S6 (captain / mute / nested / caps / watcher)"
+log "[3/6] running scenarios S1..S7 (captain / mute / nested / caps / watcher / t020 concurrency)"
 
 step "S1 — CAPTAIN (zero regression, nested opt-in persisted)"
 run_scenario S1 "$STATE_ROOT/s1" "export PI_FLEET_CAPTAIN=1; unset FLEET_TASK_ID FLEET_DEPTH;"
@@ -382,6 +435,9 @@ run_scenario S5 "$STATE_ROOT/s5" "unset PI_FLEET_CAPTAIN; export FLEET_TASK_ID=c
 step "S6 — SCOPED WATCHER in the child (fleet_notice wakes + group digest)"
 run_scenario S6 "$STATE_ROOT/s6" "unset PI_FLEET_CAPTAIN; export FLEET_TASK_ID=child-w FLEET_DEPTH=1;"
 
+step "S7 — T-020: two same-tick fleet_launch (shared group) → both start, ONE digest"
+run_scenario S7 "$STATE_ROOT/s7" "export PI_FLEET_CAPTAIN=1; unset FLEET_TASK_ID FLEET_DEPTH;"
+
 # ------------------------------------------------- [4/6] verdicts
 log "[4/6] verdicts:"
 cat "$VERDICT_DIR"/S?.txt
@@ -393,8 +449,8 @@ log "[6/6] outcome"
 if [[ "$RED" -gt 0 ]]; then
   die "$RED scenario(s) RED — see the FAIL lines above"
 fi
-if [[ "$GREEN" -ne 6 ]]; then
-  die "expected 6 green scenarios, got $GREEN (a scenario crashed?)"
+if [[ "$GREEN" -ne 7 ]]; then
+  die "expected 7 green scenarios, got $GREEN (a scenario crashed?)"
 fi
-log "OUTCOME: OK — T-013 nested-launch gate: captain regression-free, mute blocked, nested enabled + scoped, depth cap honored, watcher wake + group digest in the child session"
+log "OUTCOME: OK — T-013 nested-launch gate: captain regression-free, mute blocked, nested enabled + scoped, depth cap honored, watcher wake + group digest in the child session; T-020 single-flight: two same-tick fleet_launch both start and the barrier delivers ONE digest"
 exit 0
