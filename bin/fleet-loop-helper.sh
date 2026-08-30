@@ -2,8 +2,11 @@
 # pi-fleet · deterministic review-loop helper (T-015)
 #
 # Pure, deterministic helpers for the review&fix loop (see
-# skills/fleet-review-loop and skills/review-loop-protocol). No AI, no state
-# mutation, no side effects: JSON in → JSON out.
+# skills/fleet-review-loop and skills/review-loop-protocol). No AI: JSON in →
+# JSON out. The loop-state subcommands (T-019) are the ONE documented exception
+# to 'no state mutation': they read/update the mechanical cycle bound file
+# ~/.pi/fleet/<loop>.loop.json ({cycle, maxCycles}) so the orchestrator bound is
+# machine-enforced, not prompt-only.
 #
 # Subcommands:
 #   dedup <state-file...>        merge + deduplicate findings (by id + location)
@@ -12,7 +15,24 @@
 #                                parallel ONLY on disjoint files, sequential
 #                                otherwise; a fixer NEVER crosses review domains
 #   spec-validate <spec.json>    validate a pipeline spec (docs/pipeline-spec.md)
+#   loop-init <loopId> <maxCycles> [--reset]
+#                                create the cycle-bound file (cycle=1)
+#   loop-next <loopId> <maxCycles>
+#                                mechanical entry to the NEXT cycle; REFUSES
+#                                (exit 1) when cycle >= maxCycles
+#   loop-final <loopId> <maxCycles>
+#                                gate for a terminal verdict: ok ONLY when
+#                                cycle == maxCycles (refuses early exits)
+#   loop-state <loopId>          read-only dump of the bound file
 #   help                         this message
+#
+# Loop-state file: $FLEET_STATE_HOME/<loopId>.loop.json (default ~/.pi/fleet).
+# loopId is sanitized to [A-Za-z0-9._-] (max 64 chars). loop-next:
+#   missing file -> init cycle=1 (ok, first cycle) | cycle < maxCycles -> bump
+#   | cycle >= maxCycles -> REFUSE {"ok":false,"refused":"maxCycles",...} exit 1.
+# loop-final: cycle == maxCycles -> ok | cycle < maxCycles -> REFUSE
+# {"ok":false,"refused":"early-exit",...} exit 1 (a terminal verdict before the
+# bound is a contract violation). All outputs are JSON on stdout; logs on stderr.
 #
 # Findings data model — the machine-readable contract of review-loop-protocol:
 #   { id, severity, domain, checklist, location, rule, problem, evidence,
@@ -358,6 +378,115 @@ cmd_spec_validate() {
 }
 
 # ---------------------------------------------------------------------------
+# loop-state helpers (T-019) — mechanical review-loop cycle bound
+# ~/.pi/fleet/<loopId>.loop.json = {cycle, maxCycles, updatedAt}
+# ---------------------------------------------------------------------------
+LOOP_STATE_HOME="${FLEET_STATE_HOME:-$HOME/.pi/fleet}"
+
+sanitize_loop_id() {
+  local raw="$1"
+  raw="$(printf '%s' "$raw" | tr -c 'A-Za-z0-9._-' '_')"
+  raw="${raw:0:64}"
+  printf '%s' "$raw"
+}
+
+loop_file() {
+  local id
+  id="$(sanitize_loop_id "$1")"
+  printf '%s' "$LOOP_STATE_HOME/$id.loop.json"
+}
+
+# loop_read <loopId> → prints {cycle, maxCycles} or nothing (missing/invalid)
+loop_read() {
+  local f
+  f="$(loop_file "$1")"
+  [[ -f "$f" ]] || return 1
+  jq -r '{cycle: (.cycle // 0), maxCycles: (.maxCycles // 0)}' "$f" 2>/dev/null
+}
+
+# loop_write <loopId> <cycle> <maxCycles> (atomic tmp+mv)
+loop_write() {
+  local f
+  f="$(loop_file "$1")"
+  mkdir -p "$LOOP_STATE_HOME" 2>/dev/null || true
+  jq -nc --argjson c "$2" --argjson m "$3" --argjson at "$(date +%s)000" \
+    '{cycle:$c, maxCycles:$m, updatedAt:$at}' > "$f.tmp.$$" 2>/dev/null \
+    && mv "$f.tmp.$$" "$f" 2>/dev/null \
+    && rm -f "$f.tmp.$$" 2>/dev/null || true
+}
+
+cmd_loop_init() {
+  local loopId="${1:-}" max="${2:-}" reset=0 f cy mx
+  [[ -n "$loopId" && -n "$max" ]] || die "loop-init: <loopId> and <maxCycles> required"
+  [[ "${3:-}" == "--reset" ]] && reset=1
+  case "$max" in ''|*[!0-9]*) die "loop-init: maxCycles must be a positive integer" ;; esac
+  [ "$max" -ge 1 ] || die "loop-init: maxCycles must be >= 1"
+  f="$(loop_file "$loopId")"
+  if [[ -f "$f" ]] && [[ "$reset" -eq 0 ]]; then
+    cy="$(jq -r '.cycle // 0' "$f" 2>/dev/null || echo 0)"
+    mx="$(jq -r '.maxCycles // 0' "$f" 2>/dev/null || echo 0)"
+    jq -nc --argjson c "$cy" --argjson m "$mx" '{ok:false, refused:"exists", cycle:$c, maxCycles:$m}'
+    exit 1
+  fi
+  loop_write "$loopId" 1 "$max"
+  jq -nc --argjson m "$max" '{ok:true, cycle:1, maxCycles:$m}'
+}
+
+cmd_loop_next() {
+  local loopId="${1:-}" max="${2:-}" cur cy mx
+  [[ -n "$loopId" && -n "$max" ]] || die "loop-next: <loopId> and <maxCycles> required"
+  case "$max" in ''|*[!0-9]*) die "loop-next: maxCycles must be a positive integer" ;; esac
+  [ "$max" -ge 1 ] || die "loop-next: maxCycles must be >= 1"
+  cur="$(loop_read "$loopId")"
+  if [[ -z "$cur" ]]; then
+    loop_write "$loopId" 1 "$max"
+    jq -nc --argjson m "$max" '{ok:true, cycle:1, maxCycles:$m}'
+    return 0
+  fi
+  cy="$(printf '%s' "$cur" | jq -r '.cycle // 0')"
+  mx="$(printf '%s' "$cur" | jq -r '.maxCycles // 0')"
+  # bound already reached (or the requested max shrank): mechanical refusal
+  if [[ "$cy" -ge "$max" ]]; then
+    jq -nc --argjson c "$cy" --argjson m "$max" \
+      '{ok:false, refused:"maxCycles", cycle:$c, maxCycles:$m, message:"cycle bound reached: cannot start another cycle"}'
+    exit 1
+  fi
+  loop_write "$loopId" $((cy + 1)) "$max"
+  jq -nc --argjson c $((cy + 1)) --argjson m "$max" '{ok:true, cycle:$c, maxCycles:$m}'
+}
+
+cmd_loop_final() {
+  local loopId="${1:-}" max="${2:-}" cur cy mx
+  [[ -n "$loopId" && -n "$max" ]] || die "loop-final: <loopId> and <maxCycles> required"
+  case "$max" in ''|*[!0-9]*) die "loop-final: maxCycles must be a positive integer" ;; esac
+  [ "$max" -ge 1 ] || die "loop-final: maxCycles must be >= 1"
+  cur="$(loop_read "$loopId")"
+  if [[ -z "$cur" ]]; then
+    jq -nc --argjson m "$max" '{ok:false, refused:"unstarted", cycle:0, maxCycles:$m}'
+    exit 1
+  fi
+  cy="$(printf '%s' "$cur" | jq -r '.cycle // 0')"
+  mx="$(printf '%s' "$cur" | jq -r '.maxCycles // 0')"
+  if [[ "$cy" -eq "$max" ]]; then
+    jq -nc --argjson c "$cy" --argjson m "$max" '{ok:true, cycle:$c, maxCycles:$m}'
+    return 0
+  fi
+  jq -nc --argjson c "$cy" --argjson m "$max" \
+    '{ok:false, refused:"early-exit", cycle:$c, maxCycles:$m, message:"terminal verdict before the cycle bound: cycle < maxCycles"}'
+  exit 1
+}
+
+cmd_loop_state() {
+  local cur
+  cur="$(loop_read "${1:-}")"
+  if [[ -z "$cur" ]]; then
+    jq -nc '{ok:false, refused:"missing", cycle:0, maxCycles:0}'
+    exit 1
+  fi
+  printf '%s\n' "$cur"
+}
+
+# ---------------------------------------------------------------------------
 main() {
   local cmd="${1:-help}"
   shift || true
@@ -366,6 +495,10 @@ main() {
     group)         cmd_group "$@" ;;
     partition)     cmd_partition "$@" ;;
     spec-validate) cmd_spec_validate "$@" ;;
+    loop-init)     cmd_loop_init "$@" ;;
+    loop-next)     cmd_loop_next "$@" ;;
+    loop-final)    cmd_loop_final "$@" ;;
+    loop-state)    cmd_loop_state "$@" ;;
     help|-h|--help) usage; exit 0 ;;
     *) die "unknown subcommand: $cmd (try: help)" ;;
   esac
