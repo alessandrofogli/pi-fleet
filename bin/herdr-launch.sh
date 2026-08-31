@@ -430,7 +430,7 @@ WORKSPACE="$(resolve_fleet_workspace)"
 [[ -z "$WORKSPACE" ]] && { herr "unable to create/resolve the fleet workspace"; fail_task "fleet workspace not resolvable"; release_worktree; exit 1; }
 log "fleet workspace: $WORKSPACE"
 TB_OUT="$(herdr_cli tab create --workspace "$WORKSPACE" --cwd "$TASK_CWD" --label "$TASK_ID" --no-focus \
-  --env "FLEET_TASK_ID=$TASK_ID" --env "FLEET_DEPTH=$CHILD_DEPTH")"
+  --env "FLEET_TASK_ID=$TASK_ID" --env "FLEET_DEPTH=$CHILD_DEPTH" --env "FLEET_STATE_HOME=$STATE_HOME")"
 TAB_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)"
 PANE_ID="$(printf '%s' "$TB_OUT" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)"
 [[ -z "$TAB_ID" || -z "$PANE_ID" ]] && { herr "tab create without tab/pane id: $TB_OUT"; fail_task "tab create failed: $TB_OUT"; release_worktree; exit 1; }
