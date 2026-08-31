@@ -1,34 +1,38 @@
 #!/usr/bin/env bash
 #
-# pi-fleet · T-027 prompt-delivery ACK smoke — fully headless
+# pi-fleet · T-029 native-initial-request smoke — fully headless
 #
 # Drives the REAL bin/herdr-launch.sh with a MOCKED herdr + MOCKED treehouse
 # (PATH shadowing — no real pane, daemon or worktree is ever touched) and an
 # ISOLATED FLEET_STATE_HOME under /tmp (the real ~/.pi/fleet is NEVER touched).
 #
-#   A  nogrow child   — the child NEVER consumes (status stays idle, no pane
-#                       output, no session-file growth): the launcher re-sends
-#                       the brief FLEET_PROMPT_ATTEMPTS_MAX times, NEVER logs
-#                       'brief delivered', writes the state record as failed,
-#                       closes tab+pane, releases the worktree, exits nonzero.
-#                       No done-marker is ever written.
-#   B  grow (status)  — the child flips agent.get → working on the FIRST
-#                       prompt: consumption ACKed at the FIRST poll, exactly
-#                       ONE prompt send, 'brief delivered to the child
-#                       (consumption ACKed)' logged, READINESS confirmed
-#                       (interactive_ready), task completes done.
+# Contract under test (T-029): the CHILD_PROMPT is delivered as pi's NATIVE
+# initial request — `agent start` carries `@<prompt-file>` in its argv and pi
+# prompts its session before the main loop. The launcher NEVER calls
+# `agent prompt` for the brief, so the delivery CANNOT be lost and there is no
+# consumption-ACK/re-send machinery anymore. What remains is a fail-soft
+# residual wait for the child to leave `idle`; a truly empty/frozen pane is
+# caught by the §7 done-wait liveness gate (agent_alive), as before.
+#
+#   A  nogrow + pane dies — the child NEVER leaves idle / never grows and the
+#      agent then DISAPPEARS from `agent list`: the residual wait logs its
+#      fail-soft message (NO re-send, NO fail-fast), the done-wait liveness
+#      gate trips → launcher exits 1, state record failed with the liveness
+#      reason, tab+pane closed, worktree released.
+#   B  grow (status)  — the child flips agent.get → working right after start:
+#      the residual wait passes at the FIRST poll, launcher logs the native
+#      delivery lines, task completes done with exactly ONE start and ZERO
+#      `agent prompt`.
 #   C  grow (session) — the child only grows its session file
-#                       (~/.pi/agent/sessions/<encoded-cwd>/, agent state stays
-#                       idle): consumption still ACKed at the FIRST poll via the
-#                       session-file signal, still ONE send, task completes done.
-#   D  baseline       — the OLD sequence (idle + sleep + prompt alone) is no
-#                       longer the delivery path: the ACK machinery sits between
-#                       the `agent prompt` call and the 'brief delivered' log.
+#      (~/.pi/agent/sessions/<encoded-cwd>/, agent state stays idle): the
+#      residual wait still passes via the session-file signal, done.
+#   D  baseline       — static source checks: ZERO `agent prompt` CALLS left in
+#      the launcher (only comments), `agent start` argv carries `@$PROMPT_PATH`,
+#      and the CHILD_PROMPT is materialized to the prompt file.
 #
 # Real herdr/treehouse are shadowed by mocks at $SCRATCH/bin (see the mock
-# headers); the launcher env knobs (FLEET_INPUT_READY_TRIES/SLEEP,
-# FLEET_PROMPT_ATTEMPTS_MAX, FLEET_ACK_POLL_SECS/POLLS_MAX) drive the bounded
-# windows down so the headless run stays fast (~10s total).
+# headers); the launcher env knobs (FLEET_STARTUP_WAIT_TRIES/SLEEP) drive the
+# bounded residual window down so the headless run stays fast.
 #
 # Prereqs: bash + jq only (no node/tsc, no herdr daemon).
 # Exit: 0 green / 1 failed / 2 missing prerequisites.
@@ -70,14 +74,18 @@ fail() { log "  FAIL $*"; }
 # ----------------------------------------------------------------- mocks ----
 cat > "$MOCK_BIN/herdr" <<'EOF'
 #!/usr/bin/env bash
-# Mock herdr CLI for the T-027 smoke — NEVER touches the real herdr daemon.
+# Mock herdr CLI for the T-029 smoke — NEVER touches the real herdr daemon.
 # Behavior driven by env (set by the test per run):
 #   MOCK_MODE           grow | nogrow | sessionfile
 #   MOCK_AGENT_STATE    path to the fake agent JSON (the mock owns/updates it)
-#   MOCK_TERM           path to the fake pane terminal text (agent read)
-#   MOCK_PROMPT_LOG     append one line per `agent prompt` call
 #   MOCK_RECORD         append "MOCK <cmd> [args]" per call (cleanup assertions)
-#   MOCK_SESSION_FILE   session file the mock appends to on prompt (sessionfile)
+#   MOCK_STARTED        touched by `agent start` (ordering: the START call is
+#                       the boundary — growth signals fire only AFTER start)
+#   MOCK_GROW_DONE      one-shot stamp: the FIRST post-start `agent get`
+#                       triggers the grow (status flip / session append)
+#   MOCK_SESSION_FILE   session file the mock appends to on growth (sessionfile)
+#   MOCK_KILL_FILE      when this file EXISTS, `agent list` reports NO agents
+#                       (simulates the child/pane disappearing)
 set -u
 [[ "$1" == "--session" ]] && shift 2
 cmd="$1"; shift
@@ -102,24 +110,38 @@ case "$cmd" in
   agent)
     sub="${1:-}"; shift
     case "$sub" in
-      start) echo '{"ok":true}' ;;
+      start)
+        : > "${MOCK_STARTED:?}"
+        echo '{"ok":true}' ;;
       wait)  echo '{"ok":true}' ;;
-      list)  echo '{"result":{"agents":[{"agent":"pi","agent_status":"idle","pane_id":"p1"}]}}' ;;
-      get)   cat "${MOCK_AGENT_STATE:?}" ;;
-      read)  cat "${MOCK_TERM:?}" ;;
-      prompt)
-        shift   # consume the pane id; the rest is the prompt text
-        printf '%s\n' "PROMPT_SENT" >> "${MOCK_PROMPT_LOG:?}"
-        case "${MOCK_MODE:-nogrow}" in
-          grow)
-            cat > "${MOCK_AGENT_STATE:?}" <<'SJSON'
+      read)  echo "" ;;
+      get)
+        # one-shot post-start growth (ordering: PRE_START_REVISION get happens
+        # BEFORE `agent start`, so it must NOT trigger the grow)
+        if [[ "${MOCK_MODE:-nogrow}" != "nogrow" ]] \
+           && [[ -f "${MOCK_STARTED:?}" ]] && [[ ! -f "${MOCK_GROW_DONE:?}" ]]; then
+          : > "${MOCK_GROW_DONE:?}"
+          case "${MOCK_MODE}" in
+            grow)
+              cat > "${MOCK_AGENT_STATE:?}" <<'SJSON'
 {"result":{"agent":{"agent_status":"working","revision":"5","interactive_ready":true,"pane_id":"p1"}}}
 SJSON
-            printf '%s\n' "$*" >> "${MOCK_TERM:?}" ;;
-          sessionfile)
-            mkdir -p "$(dirname "${MOCK_SESSION_FILE:?}")"
-            printf '%s\n' "$(date +%s) session wrote turn state" >> "${MOCK_SESSION_FILE:?}" ;;
-        esac
+              ;;
+            sessionfile)
+              mkdir -p "$(dirname "${MOCK_SESSION_FILE:?}")"
+              printf '%s\n' "$(date +%s) session wrote turn state" >> "${MOCK_SESSION_FILE:?}" ;;
+          esac
+        fi
+        cat "${MOCK_AGENT_STATE:?}" ;;
+      list)
+        if [[ -n "${MOCK_KILL_FILE:-}" ]] && [[ -f "${MOCK_KILL_FILE:?}" ]]; then
+          echo '{"result":{"agents":[]}}'
+        else
+          echo '{"result":{"agents":[{"agent":"pi","agent_status":"idle","pane_id":"p1"}]}}'
+        fi ;;
+      prompt)
+        # MUST never be called for the brief under T-029; recorded so the
+        # zero-prompt assertion can prove it (the smoke greps the record).
         echo '{"ok":true}' ;;
     esac ;;
 esac
@@ -128,7 +150,7 @@ EOF
 
 cat > "$MOCK_BIN/treehouse" <<'EOF'
 #!/usr/bin/env bash
-# Mock treehouse for the T-027 smoke — records calls, returns the fake worktree
+# Mock treehouse for the T-029 smoke — records calls, returns the fake worktree
 # path as the LAST stdout line (exactly what the launcher parses for `get`).
 set -u
 echo "TREEHOUSE $*" >> "${MOCK_TREE_LOG:?}"
@@ -168,93 +190,85 @@ enc_session_dir() {
 }
 SESS_DIR="$HOME_DIR/.pi/agent/sessions/$(enc_session_dir)"
 
-# Seed the fake child fixtures for a scenario mode, then run the REAL launcher
-# with the mocked herdr/treehouse + isolated state + fast ACK knobs.
-#   launch_scenario <mode> <out-file> <task-id>
-launch_scenario() {
-  local mode="$1" out="$2" tid="$3"
-  local agent_state="$SCRATCH/$tid.agent.json" term="$SCRATCH/$tid.term"
-  : > "$term"
-  case "$mode" in
-    nogrow)
-      # never ready, never consumes
-      cat > "$agent_state" <<'SJSON'
-{"result":{"agent":{"agent_status":"idle","revision":"2","interactive_ready":null,"pane_id":"p1"}}}
-SJSON
-      rm -f "$SCRATCH/$tid.session.jsonl" ;;
-    grow)
-      # input layer ready from the start; status flips to working on the prompt
-      cat > "$agent_state" <<'SJSON'
-{"result":{"agent":{"agent_status":"idle","revision":"2","interactive_ready":true,"pane_id":"p1"}}}
-SJSON
-      rm -f "$SCRATCH/$tid.session.jsonl" ;;
-    sessionfile)
-      # input layer NEVER ready (fail-soft readiness), agent stays idle; only
-      # the session file grows when the prompt is received
-      cat > "$agent_state" <<'SJSON'
-{"result":{"agent":{"agent_status":"idle","revision":"2","interactive_ready":null,"pane_id":"p1"}}}
-SJSON
-      rm -f "$SCRATCH/$tid.session.jsonl" ;;
-  esac
-  # pre-create the session dir (the launcher's signal 4 needs it to exist)
-  mkdir -p "$SESS_DIR"
-  rlimit 90 "$out" env \
-    FLEET_STATE_HOME="$STATE" \
-    MOCK_MODE="$mode" \
-    MOCK_AGENT_STATE="$agent_state" \
-    MOCK_TERM="$term" \
-    MOCK_PROMPT_LOG="$SCRATCH/$tid.prompts" \
-    MOCK_RECORD="$SCRATCH/$tid.record" \
-    MOCK_TREE_LOG="$SCRATCH/$tid.tree" \
-    MOCK_SESSION_FILE="$SESS_DIR/session.jsonl" \
-    MOCK_WT_PATH="$WT" \
-    FLEET_INPUT_READY_TRIES=1 \
-    FLEET_INPUT_READY_SLEEP=1 \
-    FLEET_PROMPT_ATTEMPTS_MAX=2 \
-    FLEET_ACK_POLL_SECS=1 \
-    FLEET_ACK_POLLS_MAX=2 \
-    HOME="$HOME_DIR" \
-    PATH="$MOCK_BIN:$PATH" \
-    "$LAUNCHER" "t027-$mode" "T-027 $mode scenario brief" \
-      --project "$PROJ" --task-id "$tid" --timeout-min 1
+# Common scenario fixtures. mode: grow|nogrow|sessionfile, tid: task id.
+scenario_env() {  # <mode> <tid> → prints the env list for the launcher run
+  local mode="$1" tid="$2"
+  printf '%s\n' \
+    "FLEET_STATE_HOME=$STATE" \
+    "MOCK_MODE=$mode" \
+    "MOCK_AGENT_STATE=$SCRATCH/$tid.agent.json" \
+    "MOCK_RECORD=$SCRATCH/$tid.record" \
+    "MOCK_TREE_LOG=$SCRATCH/$tid.tree" \
+    "MOCK_STARTED=$SCRATCH/$tid.started" \
+    "MOCK_GROW_DONE=$SCRATCH/$tid.growdone" \
+    "MOCK_SESSION_FILE=$SESS_DIR/session.jsonl" \
+    "MOCK_KILL_FILE=$SCRATCH/$tid.kill" \
+    "MOCK_WT_PATH=$WT" \
+    "FLEET_STARTUP_WAIT_TRIES=2" \
+    "FLEET_STARTUP_WAIT_SLEEP=1" \
+    "HOME=$HOME_DIR" \
+    "PATH=$MOCK_BIN:$PATH"
+}
+
+# Seed the fake child fixtures for a scenario and launch the REAL launcher.
+launch_scenario() {  # <mode> <out-file> <tid> [--bg]
+  local mode="$1" out="$2" tid="$3" bg="${4:-}"
+  seed_fixtures "$mode" "$tid"
+  local envs
+  envs="$(scenario_env "$mode" "$tid")"
+  if [[ "$bg" == "--bg" ]]; then
+    env -i /usr/bin/env bash -c "
+      set -a
+      $envs
+      set +a
+      exec \"\$@\"
+    " bash "$LAUNCHER" "t029-$mode" "T-029 $mode scenario brief" \
+      --project "$PROJ" --task-id "$tid" --timeout-min 1 >"$out" 2>&1 &
+    echo $!
+    return 0
+  fi
+  rlimit 120 "$out" env -i /usr/bin/env bash -c "
+    set -a
+    $envs
+    set +a
+    exec \"\$@\"
+  " bash "$LAUNCHER" "t029-$mode" "T-029 $mode scenario brief" \
+    --project "$PROJ" --task-id "$tid" --timeout-min 1
   return $?
 }
 
-# For the growing scenarios: run the launcher in background, feed the
-# done-marker as soon as the delivery ACK appears, then wait (bounded) for the
-# launcher exit. Returns the launcher exit code.
-launch_and_feed_done() {  # <mode> <out-file> <task-id>
-  local mode="$1" out="$2" tid="$3"
-  local pid rc
-  env \
-    FLEET_STATE_HOME="$STATE" \
-    MOCK_MODE="$mode" \
-    MOCK_AGENT_STATE="$SCRATCH/$tid.agent.json" \
-    MOCK_TERM="$SCRATCH/$tid.term" \
-    MOCK_PROMPT_LOG="$SCRATCH/$tid.prompts" \
-    MOCK_RECORD="$SCRATCH/$tid.record" \
-    MOCK_TREE_LOG="$SCRATCH/$tid.tree" \
-    MOCK_SESSION_FILE="$SESS_DIR/session.jsonl" \
-    MOCK_WT_PATH="$WT" \
-    FLEET_INPUT_READY_TRIES=1 \
-    FLEET_INPUT_READY_SLEEP=1 \
-    FLEET_PROMPT_ATTEMPTS_MAX=2 \
-    FLEET_ACK_POLL_SECS=1 \
-    FLEET_ACK_POLLS_MAX=2 \
-    HOME="$HOME_DIR" \
-    PATH="$MOCK_BIN:$PATH" \
-    "$LAUNCHER" "t027-$tid" "T-027 $tid scenario brief" \
-      --project "$PROJ" --task-id "$tid" --timeout-min 1 >"$out" 2>&1 &
-  pid=$!
-  for ((i = 0; i < 120; i++)); do        # wait for the delivery ACK (≤60s)
-    grep -q 'brief delivered to the child' "$out" 2>/dev/null && break
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 0.5
-  done
-  if [[ ! -f "$STATE/$tid.done.json" ]]; then
-    jq -nc '{status:"done",summary:"consumption ack ok",changedFiles:[]}' > "$STATE/$tid.done.json"
-  fi
-  for ((i = 0; i < 180; i++)); do        # wait for the launcher exit (≤90s)
+# Seed the fake child fixtures for a scenario mode.
+seed_fixtures() {  # <mode> <tid>
+  local mode="$1" tid="$2"
+  local agent_state="$SCRATCH/$tid.agent.json"
+  case "$mode" in
+    nogrow)
+      # never leaves idle, never grows
+      cat > "$agent_state" <<'SJSON'
+{"result":{"agent":{"agent_status":"idle","revision":"2","interactive_ready":null,"pane_id":"p1"}}}
+SJSON
+      rm -f "$SESS_DIR/session.jsonl" "$SCRATCH/$tid.started" "$SCRATCH/$tid.growdone" "$SCRATCH/$tid.kill" ;;
+    grow)
+      # input layer ready from the start; mock flips status to working post-start
+      cat > "$agent_state" <<'SJSON'
+{"result":{"agent":{"agent_status":"idle","revision":"2","interactive_ready":true,"pane_id":"p1"}}}
+SJSON
+      rm -f "$SESS_DIR/session.jsonl" "$SCRATCH/$tid.started" "$SCRATCH/$tid.growdone" "$SCRATCH/$tid.kill" ;;
+    sessionfile)
+      # input layer NEVER ready (fail-soft), agent stays idle; the mock grows
+      # only the session file post-start
+      cat > "$agent_state" <<'SJSON'
+{"result":{"agent":{"agent_status":"idle","revision":"2","interactive_ready":null,"pane_id":"p1"}}}
+SJSON
+      rm -f "$SESS_DIR/session.jsonl" "$SCRATCH/$tid.started" "$SCRATCH/$tid.growdone" "$SCRATCH/$tid.kill" ;;
+  esac
+  mkdir -p "$SESS_DIR"
+}
+
+# Wait (bounded) for a launcher pid to exit; returns the exit code.
+wait_pid() {  # <pid> <secs>
+  local pid="$1" secs="$2" rc
+  for ((i = 0; i < secs * 2; i++)); do
     kill -0 "$pid" 2>/dev/null || { wait "$pid"; rc=$?; return $rc; }
     sleep 0.5
   done
@@ -263,178 +277,170 @@ launch_and_feed_done() {  # <mode> <out-file> <task-id>
   return 124
 }
 
-# seeded fixtures for the background-fed scenarios (launch_and_feed_done reuses
-# the same paths launch_scenario would create)
-seed_fixtures() {  # <mode> <task-id>
-  local mode="$1" tid="$2"
-  local agent_state="$SCRATCH/$tid.agent.json" term="$SCRATCH/$tid.term"
-  : > "$term"
-  case "$mode" in
-    grow)
-      cat > "$agent_state" <<'SJSON'
-{"result":{"agent":{"agent_status":"idle","revision":"2","interactive_ready":true,"pane_id":"p1"}}}
-SJSON
-      ;;
-    sessionfile)
-      cat > "$agent_state" <<'SJSON'
-{"result":{"agent":{"agent_status":"idle","revision":"2","interactive_ready":null,"pane_id":"p1"}}}
-SJSON
-      ;;
-  esac
-  rm -f "$SESS_DIR/session.jsonl"
-  mkdir -p "$SESS_DIR"
+# Wait (bounded) for a pattern in the launcher out file.
+wait_log() {  # <out-file> <pattern> <secs>
+  local out="$1" pat="$2" secs="$3"
+  for ((i = 0; i < secs * 2; i++)); do
+    grep -q -- "$pat" "$out" 2>/dev/null && return 0
+    sleep 0.5
+  done
+  return 1
 }
 
+# The task brief must already be materialized as <tid>.prompt.md by the
+# launcher — used by the prompt-file assertions.
+prompt_file() { echo "$STATE/tasks/$1.prompt.md"; }
+
 # ============================================================ A nogrow ======
-log "STEP A — child NEVER consumes → retries, fail-fast, no spurious 'brief delivered'"
-launch_scenario nogrow "$SCRATCH/a.out" t027a
+log "STEP A — nogrow child + pane dies → fail-soft residual wait (NO re-send) then liveness fail"
+launch_scenario nogrow "$SCRATCH/a.out" t029a --bg
+PID_A=$!
+log "  launcher pid=$PID_A"
+wait_log "$SCRATCH/a.out" "child didn't leave idle within" 30 \
+  && pass "A1 fail-soft residual wait logged (NO fail-fast on nogrow)" \
+  || fail "A1 fail-soft residual wait message missing"
+grep -q "brief delivered to the child (native initial request)" "$SCRATCH/a.out" \
+  && pass "A2 'brief delivered to the child (native initial request)' logged after start" \
+  || fail "A2 native delivery log missing"
+touch "$SCRATCH/t029a.kill"   # the agent disappears → done-wait liveness trips
+wait_pid "$PID_A" 120
 RC_A=$?
-log "  launcher exit=$RC_A (expected 1)"
+log "  launcher exit=$RC_A (expected 1 via the §7 liveness gate)"
 if [[ "$RC_A" -eq 1 ]]; then
-  pass "A1 launcher exits non-zero on the fail-fast path (rc=1)"
+  pass "A3 launcher exits 1 via the liveness gate (not fail-fast, no re-send)"
 else
-  fail "A1 expected rc=1, got rc=$RC_A"
+  fail "A3 expected rc=1 (liveness), got rc=$RC_A"
 fi
-if ! grep -q 'brief delivered to the child' "$SCRATCH/a.out" 2>/dev/null; then
-  pass "A2 NO 'brief delivered to the child' logged (even though prompts were sent)"
+if ! grep -q 'MOCK agent prompt' "$SCRATCH/t029a.record" 2>/dev/null; then
+  pass "A4 ZERO 'agent prompt' calls for the brief (no re-send machinery)"
 else
-  fail "A2 'brief delivered to the child' logged spuriously"
+  fail "A4 'agent prompt' was called!"
 fi
-A_PROMPTS="$(wc -l < "$SCRATCH/t027a.prompts" 2>/dev/null | tr -d ' ')"
-if [[ "$A_PROMPTS" -eq 2 ]]; then
-  pass "A3 brief re-sent exactly FLEET_PROMPT_ATTEMPTS_MAX=2 times (sends=$A_PROMPTS)"
-else
-  fail "A3 expected 2 prompt sends, got $A_PROMPTS"
-fi
-if [[ -f "$STATE/t027a.json" ]]; then
-  A_ST="$(jq -r '.state // ""' "$STATE/t027a.json")"
-  A_SUM="$(jq -r '.summary // ""' "$STATE/t027a.json")"
-  if [[ "$A_ST" == "failed" ]] && [[ "$A_SUM" == *"brief not consumed"* ]]; then
-    pass "A4 state record written as failed with the ACK reason (state=$A_ST)"
+if [[ -f "$STATE/t029a.json" ]]; then
+  A_ST="$(jq -r '.state // ""' "$STATE/t029a.json")"
+  A_SUM="$(jq -r '.summary // ""' "$STATE/t029a.json")"
+  if [[ "$A_ST" == "failed" ]] && [[ "$A_SUM" == *"without writing the done-marker"* ]]; then
+    pass "A5 state=failed with the LIVENESS reason (summary: ${A_SUM:0:60}…)"
   else
-    fail "A4 expected state=failed + 'brief not consumed' summary, got state=$A_ST summary='$A_SUM'"
+    fail "A5 expected state=failed + liveness summary, got state=$A_ST summary='$A_SUM'"
   fi
 else
-  fail "A4 missing state record $STATE/t027a.json"
+  fail "A5 missing state record $STATE/t029a.json"
 fi
-if grep -q 'MOCK tab close' "$SCRATCH/t027a.record" && grep -q 'MOCK pane close' "$SCRATCH/t027a.record"; then
-  pass "A5 cleanup: tab + pane closed"
+if [[ -f "$(prompt_file t029a)" ]] \
+   && grep -q "T-029 nogrow scenario brief" "$(prompt_file t029a)" \
+   && grep -q "DELIVERY POSTURE:" "$(prompt_file t029a)"; then
+  pass "A6 prompt file written with the full CHILD_PROMPT (brief + posture)"
 else
-  fail "A5 cleanup: tab/pane close not recorded"
+  fail "A6 prompt file missing/incomplete ($(prompt_file t029a))"
 fi
-if grep -q 'TREEHOUSE get' "$SCRATCH/t027a.tree" && grep -q 'TREEHOUSE return' "$SCRATCH/t027a.tree"; then
-  pass "A6 cleanup: worktree leased + released"
+grep -q 'MOCK agent start .*@' "$SCRATCH/t029a.record" \
+  && grep -q '@'"$STATE/tasks/t029a.prompt.md" "$SCRATCH/t029a.record" \
+  && pass "A7 agent start argv carries @<prompt-file> (native initial request)" \
+  || fail "A7 @<prompt-file> not found in the agent start argv record"
+if grep -q 'MOCK tab close' "$SCRATCH/t029a.record" && grep -q 'MOCK pane close' "$SCRATCH/t029a.record" \
+   && grep -q 'TREEHOUSE return' "$SCRATCH/t029a.tree"; then
+  pass "A8 cleanup: tab + pane closed, worktree released"
 else
-  fail "A6 cleanup: treehouse get/return not both recorded"
-fi
-if [[ ! -f "$STATE/t027a.done.json" && ! -f "$STATE/t027a.needs-input.json" ]]; then
-  pass "A7 NO done-marker / needs-input written (fail-fast happened before the done-wait)"
-else
-  fail "A7 unexpected marker after fail-fast"
+  fail "A8 cleanup incomplete (record: $(tail -2 "$SCRATCH/t029a.record" 2>/dev/null | tr '\n' ' '))"
 fi
 
 # ======================================================== B grow (status) ===
-log "STEP B — child consumes (status → working): ACK at first poll, one send, done"
-seed_fixtures grow t027b
-launch_and_feed_done grow "$SCRATCH/b.out" t027b
+log "STEP B — child leaves idle (status → working): residual wait passes, one start, done"
+launch_scenario grow "$SCRATCH/b.out" t029b --bg
+PID_B=$!
+log "  launcher pid=$PID_B"
+wait_log "$SCRATCH/b.out" "child left idle — processing the native initial request" 30 \
+  && pass "B1 residual wait passed: 'child left idle' logged (first poll)" \
+  || fail "B1 'child left idle' not logged"
+grep -q "brief delivered to the child (native initial request)" "$SCRATCH/b.out" \
+  && pass "B2 native delivery logged after start" \
+  || fail "B2 native delivery log missing"
+# feed the done-marker now that the delivery is confirmed
+if [[ ! -f "$STATE/t029b.done.json" ]]; then
+  jq -nc '{status:"done",summary:"native initial request ok, status-grow",changedFiles:[]}' > "$STATE/t029b.done.json"
+fi
+wait_pid "$PID_B" 90
 RC_B=$?
 log "  launcher exit=$RC_B (expected 0)"
 if [[ "$RC_B" -eq 0 ]]; then
-  pass "B1 launcher exits 0 after a consumed brief"
+  pass "B3 launcher exits 0 after the native-request task completes"
 else
-  fail "B1 expected rc=0, got rc=$RC_B (out: $(tail -3 "$SCRATCH/b.out" 2>/dev/null | tr '\n' ' '))"
+  fail "B3 expected rc=0, got rc=$RC_B (out: $(tail -3 "$SCRATCH/b.out" 2>/dev/null | tr '\n' ' '))"
 fi
-if grep -q 'input layer ready (interactive_ready confirmed)' "$SCRATCH/b.out"; then
-  pass "B2 stronger readiness: interactive_ready confirmed before the prompt"
+if ! grep -q 'MOCK agent prompt' "$SCRATCH/t029b.record" 2>/dev/null; then
+  pass "B4 ZERO 'agent prompt' calls (single native start)"
 else
-  fail "B2 'interactive_ready confirmed' not logged"
+  fail "B4 'agent prompt' was called!"
 fi
-if grep -q 'brief delivered to the child (consumption ACKed)' "$SCRATCH/b.out"; then
-  pass "B3 'brief delivered to the child (consumption ACKed)' logged (and only after the ACK)"
+if [[ -f "$STATE/t029b.json" ]] && [[ "$(jq -r '.state // ""' "$STATE/t029b.json")" == "done" ]] \
+   && [[ "$(jq -r '.summary // ""' "$STATE/t029b.json")" == "native initial request ok, status-grow" ]]; then
+  pass "B5 task completed: state=done, summary from the done-marker"
 else
-  fail "B3 delivery-ACK log missing"
+  fail "B5 expected state=done + summary, got $(jq -r '.state // "<missing>"' "$STATE/t029b.json" 2>/dev/null)"
 fi
-B_PROMPTS="$(wc -l < "$SCRATCH/t027b.prompts" 2>/dev/null | tr -d ' ')"
-if [[ "$B_PROMPTS" -eq 1 ]]; then
-  pass "B4 exactly ONE prompt send (consumption detected at the first poll)"
+if [[ ! -f "$STATE/t029b.done.json" ]] \
+   && grep -q 'TREEHOUSE return' "$SCRATCH/t029b.tree"; then
+  pass "B6 done-marker consumed + worktree released"
 else
-  fail "B4 expected 1 prompt send, got $B_PROMPTS (would mean retries)"
-fi
-if [[ -f "$STATE/t027b.json" ]]; then
-  B_ST="$(jq -r '.state // ""' "$STATE/t027b.json")"
-  B_SUM="$(jq -r '.summary // ""' "$STATE/t027b.json")"
-  if [[ "$B_ST" == "done" ]] && [[ "$B_SUM" == "consumption ack ok" ]]; then
-    pass "B5 task completed: state=done, summary from the done-marker"
-  else
-    fail "B5 expected state=done + 'consumption ack ok', got state=$B_ST summary='$B_SUM'"
-  fi
-else
-  fail "B5 missing state record $STATE/t027b.json"
-fi
-if [[ ! -f "$STATE/t027b.done.json" ]]; then
-  pass "B6 done-marker consumed by the launcher"
-else
-  fail "B6 done-marker still present"
-fi
-if grep -q 'MOCK tab close' "$SCRATCH/t027b.record" && grep -q 'MOCK pane close' "$SCRATCH/t027b.record" \
-   && grep -q 'TREEHOUSE return' "$SCRATCH/t027b.tree"; then
-  pass "B7 cleanup: tab/pane closed + worktree released"
-else
-  fail "B7 cleanup incomplete (record: $(tail -2 "$SCRATCH/t027b.record" 2>/dev/null | tr '\n' ' '))"
+  fail "B6 done-marker still present or treehouse not returned"
 fi
 
 # ==================================================== C grow (session file) ==
-log "STEP C — child only grows its session file: ACK via the session-file signal"
-seed_fixtures sessionfile t027c
-launch_and_feed_done sessionfile "$SCRATCH/c.out" t027c
+log "STEP C — child only grows its session file: residual wait passes via the session signal"
+launch_scenario sessionfile "$SCRATCH/c.out" t029c --bg
+PID_C=$!
+log "  launcher pid=$PID_C"
+wait_log "$SCRATCH/c.out" "child left idle — processing the native initial request" 30 \
+  && pass "C1 residual wait passed via the SESSION-FILE signal (status stayed idle)" \
+  || fail "C1 'child left idle' not logged for the session-file grow"
+if [[ -s "$SESS_DIR/session.jsonl" ]]; then
+  pass "C2 the mock child session file actually grew (signal source present)"
+else
+  fail "C2 session file empty — the signal could not have come from it"
+fi
+if [[ -f "$STATE/t029c.done.json" ]]; then :; else
+  jq -nc '{status:"done",summary:"native initial request ok, session-grow",changedFiles:[]}' > "$STATE/t029c.done.json"
+fi
+wait_pid "$PID_C" 90
 RC_C=$?
 log "  launcher exit=$RC_C (expected 0)"
 if [[ "$RC_C" -eq 0 ]]; then
-  pass "C1 launcher exits 0 after a session-file-consumed brief"
+  pass "C3 launcher exits 0 after a session-file-grow delivery"
 else
-  fail "C1 expected rc=0, got rc=$RC_C (out: $(tail -3 "$SCRATCH/c.out" 2>/dev/null | tr '\n' ' '))"
+  fail "C3 expected rc=0, got rc=$RC_C (out: $(tail -3 "$SCRATCH/c.out" 2>/dev/null | tr '\n' ' '))"
 fi
-if grep -q 'input-ready signal not confirmed' "$SCRATCH/c.out"; then
-  pass "C2 readiness fail-soft: interactive_ready absent → proceeds (the ACK is the gate)"
+if ! grep -q 'MOCK agent prompt' "$SCRATCH/t029c.record" 2>/dev/null \
+   && [[ -f "$STATE/t029c.json" ]] && [[ "$(jq -r '.state // ""' "$STATE/t029c.json")" == "done" ]]; then
+  pass "C4 zero prompt + task done (state=done)"
 else
-  fail "C2 fail-soft readiness log missing"
-fi
-if grep -q 'brief delivered to the child (consumption ACKed)' "$SCRATCH/c.out"; then
-  pass "C3 delivery ACKed via session-file growth (interactive_ready was never true)"
-else
-  fail "C3 delivery-ACK log missing"
-fi
-C_PROMPTS="$(wc -l < "$SCRATCH/t027c.prompts" 2>/dev/null | tr -d ' ')"
-if [[ "$C_PROMPTS" -eq 1 ]]; then
-  pass "C4 exactly ONE prompt send (session-file signal fired at the first poll)"
-else
-  fail "C4 expected 1 prompt send, got $C_PROMPTS"
-fi
-if [[ -s "$SESS_DIR/session.jsonl" ]]; then
-  pass "C5 the mock child session file actually grew (signal source present)"
-else
-  fail "C5 session file empty — the ACK could not have come from it"
-fi
-if [[ -f "$STATE/t027c.json" ]] && [[ "$(jq -r '.state // ""' "$STATE/t027c.json")" == "done" ]]; then
-  pass "C6 task completed: state=done"
-else
-  fail "C6 expected state=done, got $(jq -r '.state // "<missing>"' "$STATE/t027c.json" 2>/dev/null)"
+  fail "C4 zero-prompt or state!=done (got $(jq -r '.state // "<missing>"' "$STATE/t029c.json" 2>/dev/null))"
 fi
 
 # ==================================================== D baseline (textual) ==
-log "STEP D — the OLD sequence (idle+sleep+prompt) is no longer the delivery path"
-AWK_PROBE="$(awk '/herdr_cli agent prompt/{l=NR} /brief delivered to the child/{d=NR} END{print l+0, d+0}' "$LAUNCHER")"
-P_LINE="${AWK_PROBE%% *}"
-D_LINE="${AWK_PROBE##* }"
-if grep -q 'prompt_consumed' "$LAUNCHER" \
-   && grep -q 'FLEET_PROMPT_ATTEMPTS_MAX' "$LAUNCHER" \
-   && [[ "$D_LINE" -gt "$P_LINE" ]] && [[ $((D_LINE - P_LINE)) -ge 30 ]]; then
-  pass "D1 delivery path is now prompt → ACK loop → 'brief delivered' (lines $P_LINE → $D_LINE)"
+log "STEP D — the launcher source carries NO agent-prompt CALL for the brief"
+if ! grep -Eq 'herdr_cli agent prompt|agent prompt "\$PANE' "$LAUNCHER"; then
+  pass "D1 ZERO 'agent prompt' CALLS in bin/herdr-launch.sh (comments only)"
 else
-  fail "D1 expected the ACK machinery (≥30 lines) between the prompt call and the 'brief delivered' log (got $P_LINE → $D_LINE)"
+  fail "D1 a 'agent prompt' call is still present"
+fi
+if grep -q 'agent start .*"@\$PROMPT_PATH"' "$LAUNCHER"; then
+  pass "D2 agent start argv carries @\$PROMPT_PATH (native initial request)"
+else
+  fail "D2 @\$PROMPT_PATH not wired into agent start"
+fi
+if grep -q '> "\$PROMPT_PATH"' "$LAUNCHER"; then
+  pass "D3 CHILD_PROMPT materialized to \$PROMPT_PATH before start"
+else
+  fail "D3 prompt-file write missing"
+fi
+if grep -q 'PROMPT_ATTEMPTS_MAX\|ACK_POLL\|consumption ACK' "$LAUNCHER"; then
+  fail "D4 leftover T-027 send/ACK machinery found"
+else
+  pass "D4 no leftover T-027 send/ACK machinery"
 fi
 
 # ---------------------------------------------------------------- result ---
-log "OUTCOME: $OK/21 prompt-ACK smoke checks green"
-[[ "$OK" -ge 21 ]] || die "not all prompt-ACK smoke checks passed"
+log "OUTCOME: $OK/22 prompt-ACK smoke checks green"
+[[ "$OK" -ge 22 ]] || die "not all prompt-ACK smoke checks passed"
 exit 0
