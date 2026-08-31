@@ -26,6 +26,9 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { mountFleetWatchArm } from "./fleet-watch-arm.js";
+// T-028 — captain audible reply (completion notification): bell policy + sink
+// (pure module, dependency-free; see fleet-sound.ts).
+import { createSoundTracker, ringForSettledTurn } from "./fleet-sound.js";
 import type { GroupRecord, GroupTaskInfo } from "./fleet-group.js";
 import type { InboxMsg } from "./fleet-inbox.js";
 import type { CheckedTool, GroupSummaryLike } from "./fleet-bootstrap.js";
@@ -2032,5 +2035,37 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         );
       } catch { /* best-effort: pruning must never block startup */ }
     })();
+  });
+
+  // T-028 — captain audible reply (completion notification).
+  // Hook SEPARATE from all the others above (house style: multiple registrations
+  // are intentional). The bell rings when the CAPTAIN's user-visible turn
+  // settles — BOTH the direct replies to the user AND the wake-and-report
+  // replies after a watcher wake (agent_settled = no retry/compaction/follow-up
+  // left, per the pi extension docs; same understanding as the notify.ts example).
+  //   - NEVER from children: separate processes with IS_CAPTAIN=false → early
+  //     return below (nested orchestrators included).
+  //   - NEVER from the internal silent wakes (display:false + followUp, e.g.
+  //     sendGroupDigest/sendWake/sendAttention above): they are role "custom"
+  //     messages, never counted as assistant output by the tracker.
+  //   - Config: notify.sound: on|off in captain.md (default ON), read at ring
+  //     time via the captain preference file (fleet_captain_pref writes it).
+  const soundTracker = createSoundTracker();
+  pi.on("agent_start", () => {
+    soundTracker.onAgentStart();
+  });
+  pi.on("message_end", (event) => {
+    try {
+      // AgentMessage is a union (BashExecutionMessage has no `content`): access
+      // role/content via a minimal structural shape, mirrors the tracker signature.
+      const m = event.message as { role?: string; content?: unknown };
+      soundTracker.onMessageEnd(m.role, m.content);
+    } catch { /* fail soft */ }
+  });
+  pi.on("agent_settled", () => {
+    if (!IS_CAPTAIN) return; // sound ONLY from the captain — never from children
+    try {
+      ringForSettledTurn(STATE_HOME, soundTracker);
+    } catch { /* fail soft: the bell must never break the captain turn */ }
   });
 }
