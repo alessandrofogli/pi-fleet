@@ -114,18 +114,18 @@ case "$BASH_TIMEOUT_S" in ''|*[!0-9]*) BASH_TIMEOUT_S=300 ;;
      fi ;;
 esac
 
-# T-027: prompt-delivery ACK knobs (env-overridable — the headless smoke test
-# tests/smoke-prompt-ack.sh drives them down to keep the run fast). Clamped to
-# sane ranges:
-#   INPUT_READY_TRIES × INPUT_READY_SLEEP : bounded wait for the pi input-layer
-#     ready signal (agent.interactive_ready) — fail-soft, the ACK is the gate;
-#   PROMPT_ATTEMPTS_MAX : re-sends of the brief, each followed by an ACK window
-#     of ACK_POLLS_MAX × ACK_POLL_SECS polling for consumption evidence.
-PROMPT_ATTEMPTS_MAX="${FLEET_PROMPT_ATTEMPTS_MAX:-3}"
-ACK_POLL_SECS="${FLEET_ACK_POLL_SECS:-3}"
-ACK_POLLS_MAX="${FLEET_ACK_POLLS_MAX:-8}"
-INPUT_READY_TRIES="${FLEET_INPUT_READY_TRIES:-5}"
-INPUT_READY_SLEEP="${FLEET_INPUT_READY_SLEEP:-3}"
+# T-029: the CHILD_PROMPT is delivered as pi's NATIVE initial request — `agent
+# start` carries `@<prompt-file>` in its argv and pi's interactive mode reads the
+# file and prompts the session BEFORE the main loop. `agent prompt` is never
+# called for the brief, so there is no delivery race to ACK. The only residual
+# check (fail-soft, NEVER re-sends) is that the child LEFT `idle` (started the
+# initial request); a frozen/empty pane is caught by the §7 done-wait liveness
+# gate. Env-overridable — the headless smoke tests/smoke-prompt-ack.sh drives
+# them down to keep the run fast:
+#   STARTUP_WAIT_TRIES × STARTUP_WAIT_SLEEP : bounded wait for the child to
+#     leave idle (status/revision/session-file growth) after `agent start`.
+STARTUP_WAIT_TRIES="${FLEET_STARTUP_WAIT_TRIES:-5}"
+STARTUP_WAIT_SLEEP="${FLEET_STARTUP_WAIT_SLEEP:-3}"
 clamp_int() {  # name min max — sanitize + clamp a numeric knob
   local name="$1" min="$2" max="$3" v
   eval "v=\${$name:-}"
@@ -134,11 +134,8 @@ clamp_int() {  # name min max — sanitize + clamp a numeric knob
   [[ "$v" -gt "$max" ]] && v="$max"
   eval "$name=$v"
 }
-clamp_int PROMPT_ATTEMPTS_MAX 1 5
-clamp_int ACK_POLL_SECS 1 10
-clamp_int ACK_POLLS_MAX 1 30
-clamp_int INPUT_READY_TRIES 1 20
-clamp_int INPUT_READY_SLEEP 1 10
+clamp_int STARTUP_WAIT_TRIES 1 20
+clamp_int STARTUP_WAIT_SLEEP 1 10
 
 # Marks failed on premature launcher exit (failed tab/agent/prompt):
 # without this the state stays 'spawning' and the task dies SILENTLY (the watcher
@@ -369,6 +366,7 @@ fi
 # ------------------------------------------------------- 3. state on disk ----
 STATE_JSON="$STATE_HOME/$TASK_ID.json"
 BRIEF_PATH="$STATE_HOME/tasks/$TASK_ID.brief.md"
+PROMPT_PATH="$STATE_HOME/tasks/$TASK_ID.prompt.md"
 DONE_PATH="$STATE_HOME/$TASK_ID.done.json"
 NEEDS_INPUT_PATH="$STATE_HOME/$TASK_ID.needs-input.json"
 
@@ -443,57 +441,15 @@ add_pane_ids
 # the processes in the worktree, including the pane shell).
 trap 'log "interrotto: pulisco..."; close_tab; release_worktree; exit 130' INT TERM
 
-# ------------------------------------------------------- 5. start pi in the pane ----
-# UNIQUE agent name per task (herdr rejects duplicate names: agent_name_taken) and
-# retry on transient races (agent_pane_busy: pane shell not yet available right
-# after tab create, typical with closely-spaced parallel launches).
-AS_OUT=""
-OK=0
-for ((try = 1; try <= 4; try++)); do
-  AS_OUT="$(herdr_cli agent start "$AGENT_NAME" --kind pi --pane "$PANE_ID" -- "${MODEL_ARGS[@]}")"
-  if [[ $? -eq 0 ]]; then OK=1; break; fi
-  herr "agent start: attempt $try/4 failed: ${AS_OUT:0:160}"
-  sleep 3
-done
-if [[ $OK -ne 1 ]]; then
-  herr "agent start failed ($AGENT_NAME): $AS_OUT"
-  fail_task "agent start failed: ${AS_OUT:0:200}"
-  close_tab
-  release_worktree
-  exit 1
-fi
-log "pi started in the pane (readiness ok)"
-
-# Waits for pi to actually be ready (idle at prompt) BEFORE the prompt:
-# a prompt sent too early goes into the buffer and is lost (race "typing too early").
-herdr_cli agent wait "$PANE_ID" --until idle >/dev/null 2>&1 \
-  || log "wait idle not confirmed (proceeding anyway)"
-sleep 2
-
-# -------------------------------------------------- 5b. input-ready wait (T-027) ----
-# `idle` only means "not processing", NOT "input layer ready to accept a prompt":
-# a prompt sent too early goes into the buffer and is lost (race "typing too
-# early"). Stronger readiness: bounded wait for the pi input-layer signal
-# (herdr `agent get` → .result.agent.interactive_ready == true) when the API
-# exposes it. Fail-soft: if the signal never confirms, proceed anyway — the
-# consumption ACK (§6b) is the real delivery gate.
-agent_input_ready() {
-  herdr_cli agent get "$PANE_ID" 2>/dev/null \
-    | jq -e '.result.agent.interactive_ready == true' >/dev/null 2>&1
-}
-INPUT_READY=0
-for ((_try = 1; _try <= INPUT_READY_TRIES; _try++)); do
-  if agent_input_ready; then INPUT_READY=1; break; fi
-  log "input-ready signal not yet (attempt $_try/$INPUT_READY_TRIES)"
-  [[ "$_try" -lt "$INPUT_READY_TRIES" ]] && sleep "$INPUT_READY_SLEEP"
-done
-if [[ "$INPUT_READY" -eq 1 ]]; then
-  log "input layer ready (interactive_ready confirmed)"
-else
-  log "input-ready signal not confirmed within ${INPUT_READY_TRIES}×${INPUT_READY_SLEEP}s (fail-soft: the consumption ACK verifies delivery)"
-fi
-
-# ------------------------------------------------------- 6. brief to the child ----
+# ------------------------------------------------------- 5.1 CHILD_PROMPT build ----
+# T-029: the brief is delivered as pi's NATIVE initial request — pi's interactive
+# mode reads `@<file>` args and prompts the session BEFORE the main loop, so the
+# full CHILD_PROMPT (rules + delivery posture + brief) is materialized on disk
+# BEFORE `agent start` and passed to the agent as `@<prompt-file>` in its argv.
+# herdr forwards agent args raw into pi's argv but REFUSES args that cannot be
+# shell-encoded safely (multi-line text with quotes/$/backticks →
+# invalid_agent_argument): hence the file indirection, NOT a direct positional
+# message argument.
 # Scout task (--kind scout): deliverable = report.md, no commit/push/PR;
 # the extra rule enters the CHILD_PROMPT only when KIND == scout.
 SCOUT_RULES=""
@@ -569,17 +525,9 @@ Respect it during delivery; if the brief asks for nothing explicit, behave accor
 
 The task is: $BRIEF_CONTENT"
 
-# ------------------------------------------ 6b. send + consumption ACK (T-027) ----
-# Sending the prompt is NOT delivery: the launcher must not log 'brief
-# delivered' until there is evidence the child CONSUMED it (the historical bug:
-# prompt buffered/lost → child sits at an empty prompt forever while the
-# launcher waits for a done marker). Sequence: send → bounded ACK poll (ANY
-# evidence = consumed) → re-send when not consumed (up to PROMPT_ATTEMPTS_MAX,
-# bounded waits between) → fail-fast: task record failed, pane+worktree
-# released, exit nonzero. NEVER a 'brief delivered' on an empty pane.
-send_prompt() {
-  herdr_cli agent prompt "$PANE_ID" "$CHILD_PROMPT" >/dev/null
-}
+# The full child prompt, materialized for the native `@<file>` initial request.
+printf '%s\n' "$CHILD_PROMPT" > "$PROMPT_PATH"
+log "child prompt file: $PROMPT_PATH"
 
 # Portable "size<TAB>path" listing of the child session tree (used to detect
 # session-file growth — pi appends per turn, so size strictly increases).
@@ -595,22 +543,51 @@ file_sizes() {  # <dir> → "size<TAB>path" per regular file (maxdepth 2)
   done
 }
 
-# Evidence the child consumed the prompt (ANY one = consumed; all fail-soft):
-#   1) agent.get status no longer idle (working/thinking/blocked → started);
-#   2) agent.get revision moved (the pane produced output after the prompt);
-#   3) the brief path is visible in the pane output (agent read — turn started);
-#   4) the child session file(s) grew since the pre-prompt snapshot.
-prompt_consumed() {
+# ------------------------------------------------------- 5.2 start pi with the prompt ----
+# T-029: the brief rides ALONG in the agent argv (`@$PROMPT_PATH`): pi reads the
+# file and prompts the session natively before its main loop. ZERO `agent prompt`
+# for the delivery. Pre-start evidence baselines (captured once — the native
+# initial turn begins DURING `agent start`, so the residual check below needs a
+# baseline to compare against).
+PRE_START_REVISION="$(herdr_cli agent get "$PANE_ID" 2>/dev/null | jq -r '.result.agent.revision // 0' 2>/dev/null)"
+SESSION_DIR="$HOME/.pi/agent/sessions/$(printf '%s' "$TASK_CWD" | sed 's|^/||; s|/|-|g; s|.*|--&--|')"
+SESSION_SNAPSHOT_BEFORE="$(file_sizes "$SESSION_DIR")"
+# UNIQUE agent name per task (herdr rejects duplicate names: agent_name_taken) and
+# retry on transient races (agent_pane_busy: pane shell not yet available right
+# after tab create, typical with closely-spaced parallel launches).
+AS_OUT=""
+OK=0
+for ((try = 1; try <= 4; try++)); do
+  AS_OUT="$(herdr_cli agent start "$AGENT_NAME" --kind pi --pane "$PANE_ID" -- "${MODEL_ARGS[@]}" "@$PROMPT_PATH")"
+  if [[ $? -eq 0 ]]; then OK=1; break; fi
+  herr "agent start: attempt $try/4 failed: ${AS_OUT:0:160}"
+  sleep 3
+done
+if [[ $OK -ne 1 ]]; then
+  herr "agent start failed ($AGENT_NAME): $AS_OUT"
+  fail_task "agent start failed: ${AS_OUT:0:200}"
+  close_tab
+  release_worktree
+  exit 1
+fi
+log "pi started in the pane (readiness ok)"
+log "brief delivered to the child (native initial request)"
+
+# -------------------------------------------------- 5.3 residual startup check (T-029) ----
+# With the native initial request the prompt CANNOT get lost (it is born inside
+# the pi process), so delivery is complete at `agent start` — the old send +
+# consumption-ACK + re-send machinery (§6b T-027) is GONE. The only residual
+# check is fail-soft and NEVER re-sends: a bounded wait for the child to leave
+# `idle` (evidence it started working the initial request). If it never does,
+# the launcher proceeds to the done-wait — a truly empty/frozen pane is caught
+# there by the §7 liveness gate (agent_alive), as before.
+startup_started() {  # evidence the child left idle (ANY one = started)
   local out st rev now
   out="$(herdr_cli agent get "$PANE_ID" 2>/dev/null)" || return 1
   st="$(printf '%s' "$out" | jq -r '.result.agent.agent_status // ""' 2>/dev/null)"
   [[ -n "$st" && "$st" != "idle" && "$st" != "unknown" ]] && return 0
   rev="$(printf '%s' "$out" | jq -r '.result.agent.revision // 0' 2>/dev/null)"
-  if [[ "$rev" =~ ^[0-9]+$ ]] && [[ "$rev" -gt "$PRE_PROMPT_REVISION" ]] 2>/dev/null; then
-    return 0
-  fi
-  if herdr_cli agent read "$PANE_ID" --source recent --format text --lines 40 2>/dev/null \
-       | grep -qF "$BRIEF_PATH"; then
+  if [[ "$rev" =~ ^[0-9]+$ ]] && [[ "$rev" -gt "$PRE_START_REVISION" ]] 2>/dev/null; then
     return 0
   fi
   if [[ -d "$SESSION_DIR" ]]; then
@@ -619,46 +596,17 @@ prompt_consumed() {
   fi
   return 1
 }
-
-# pre-prompt evidence baselines (captured once, before the first send)
-PRE_PROMPT_REVISION="$(herdr_cli agent get "$PANE_ID" 2>/dev/null | jq -r '.result.agent.revision // 0' 2>/dev/null)"
-SESSION_DIR="$HOME/.pi/agent/sessions/$(printf '%s' "$TASK_CWD" | sed 's|^/||; s|/|-|g; s|.*|--&--|')"
-SESSION_SNAPSHOT_BEFORE="$(file_sizes "$SESSION_DIR")"
-
-BRIEF_DELIVERED=0
-BRIEF_FAIL_REASON="not consumed by the child"
-_attempt=0
-while [[ "$BRIEF_DELIVERED" -eq 0 && "$_attempt" -lt "$PROMPT_ATTEMPTS_MAX" ]]; do
-  _attempt=$((_attempt + 1))
-  if ! send_prompt; then
-    BRIEF_FAIL_REASON="send failed"
-    herr "brief send failed (attempt $_attempt/$PROMPT_ATTEMPTS_MAX): retrying"
-    [[ "$_attempt" -lt "$PROMPT_ATTEMPTS_MAX" ]] && sleep 2
-    continue
-  fi
-  _poll=0
-  while [[ "$BRIEF_DELIVERED" -eq 0 && "$_poll" -lt "$ACK_POLLS_MAX" ]]; do
-    if prompt_consumed; then
-      BRIEF_DELIVERED=1
-      break
-    fi
-    _poll=$((_poll + 1))
-    [[ "$_poll" -lt "$ACK_POLLS_MAX" ]] && sleep "$ACK_POLL_SECS"
-  done
-  if [[ "$BRIEF_DELIVERED" -eq 0 && "$_attempt" -lt "$PROMPT_ATTEMPTS_MAX" ]]; then
-    log "brief not consumed within the ack window (attempt $_attempt/$PROMPT_ATTEMPTS_MAX): re-sending"
-    sleep 2
-  fi
+STARTED=0
+for ((_try = 1; _try <= STARTUP_WAIT_TRIES; _try++)); do
+  if startup_started; then STARTED=1; break; fi
+  log "child not out of idle yet (attempt $_try/$STARTUP_WAIT_TRIES)"
+  [[ "$_try" -lt "$STARTUP_WAIT_TRIES" ]] && sleep "$STARTUP_WAIT_SLEEP"
 done
-
-if [[ "$BRIEF_DELIVERED" -ne 1 ]]; then
-  herr "the child did not consume the brief after $PROMPT_ATTEMPTS_MAX attempts (T-027): fail-fast, no 'brief delivered'"
-  fail_task "brief $BRIEF_FAIL_REASON after $PROMPT_ATTEMPTS_MAX attempts (empty/frozen pane?)"
-  close_tab
-  release_worktree
-  exit 1
+if [[ "$STARTED" -eq 1 ]]; then
+  log "child left idle — processing the native initial request"
+else
+  log "child didn't leave idle within ${STARTUP_WAIT_TRIES}×${STARTUP_WAIT_SLEEP}s (fail-soft: no re-send; the done-wait §7 liveness gate flags an empty/frozen pane)"
 fi
-log "brief delivered to the child (consumption ACKed)"
 
 # ------------------------------------------------------- 7. done-marker wait ----
 # Liveness: if the child (agent in the pane) disappears without writing a marker
