@@ -1,6 +1,6 @@
 # pi-fleet
 
-Visible sub-agents for [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`): delegate a task and a child `pi` starts in a **dedicated herdr "fleet" workspace** (background tab, `--no-focus`), working in an **isolated treehouse worktree**. The child never steals focus and never occupies space in your tab: it appears **only in the herdr agents sidebar (left)**, whose state rolls up per workspace. The main chat stays free, and the result lands back in the chat via a **silent, non-interrupting directive** (`display:false` + `deliverAs: followUp` + `triggerTurn:true`) that the main agent synthesizes for you; failures and `needs_input` are the ones that explicitly demand the captain (in barrier groups, per-task wakes are buffered into a single group digest).
+Visible sub-agents for [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`): delegate a task and a child `pi` starts in a **dedicated herdr "fleet" workspace** (background tab, `--no-focus`), working in an **isolated treehouse worktree**. The child never steals focus and never occupies space in your tab: it appears **only in the herdr agents sidebar (left)**, whose state rolls up per workspace. The main chat stays free, and the result lands back in the chat via a **silent, non-interrupting directive** (`display:false` + `deliverAs: followUp` + `triggerTurn:true`) that the main agent synthesizes for you; failures and `needs_input` are the ones that explicitly demand the captain (in barrier groups, per-task wakes are buffered into a single group digest). An optional **terminal bell** rings when the captain's reply is fully delivered (captain-only, config `notify.sound`, default on — see *Audible reply*).
 
 A [Firstmate](https://github.com/kunchenguid/firstmate)-like experience inside pi, without external agents.
 
@@ -285,6 +285,20 @@ are available at every captain `session_start` (the startup log reports `captain
 | `fleet_captain_pref` | `action: "get" \| "set"`, `key`, `value` (set only), `shared` (default `false` → `captain.md`; `true` → `captain-shared.md`). Get → value or `null`; set → confirmation with the written line. |
 | `fleet_learn` | `title`, `fact`, `implication?`, `opts?` (`tier`: `"aging"` \| `"perishable"` \| `"pinned"`, default `aging`; `expiry` required for `perishable`, e.g. "after the v0.4 deploy"). Appends a dated section to `learnings.md`; dedup by title in the last 24h (replaces the section instead of duplicating). |
 | `fleet_stow` | `dryRun?`, `verbose?` — memory pruning pass: stale → refresh or archive; dedup; budget. `dryRun: true` → report only, zero writes. |
+| `notify.sound` | Captain preference (captain.md) controlling the **audible reply**: a terminal bell (BEL) rings when the captain's user-visible turn completes — both direct replies and wake-and-report digests of children. `on` (default) \| `off` (silence). |
+
+**Audible reply (completion notification)** — when a fleet task completes, the child only writes its
+`<id>.done.json` marker and exits: **no sound ever comes from a child**. The bell fires **only from the
+captain**, on its **displayed** reply — in both cases: (1) answering the user directly, and (2) waking-and
+-reporting the children's work after a watcher wake (the internal `display:false` directive wakes stay
+silent — only the captain's visible synthesis rings). One settled captain turn = one bell: with the
+default `groupMode: barrier` a group completes with **one digest = one bell**; with
+`groupMode: streaming` the captain replies per task, so **several bells** follow the tasks.
+To silence it globally set the preference once (runtime-global, never in git):
+
+```
+fleet_captain_pref set notify.sound off
+```
 
 **File format** (`key: value` lines, `#` comments, free `##` sections):
 
