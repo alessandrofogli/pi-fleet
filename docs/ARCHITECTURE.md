@@ -93,6 +93,14 @@ Standardized frozen-pane recovery, invoked detached by the watchdog at kill time
 ### `bin/herdr-launch.sh --resume` (T-019)
 Resume mode: reuses the existing worktree (`state.cwd`, no new lease), re-aligns the branch on the WIP base from the `.relaunch` plan (named branch, `relaunches[]` appended to the state), rebuilds the same CHILD_PROMPT plus a RESUME NOTICE, and preserves `groupId`/`nested`/`depth`/gate from the existing registry state. The resumed launcher owns the final pane teardown and worktree release.
 
+### `bin/herdr-launch.sh` — prompt delivery + consumption ACK (T-027)
+Sending the brief is NOT delivery: the launcher logs `brief delivered` only after evidence the child CONSUMED it (the historical race: a prompt sent too early goes into the buffer and is lost → child sits at an empty prompt forever while the launcher waits for a done marker).
+- **Readiness (stronger, fail-soft)**: after `agent wait --until idle` + `sleep 2`, a bounded wait for the pi input-layer signal `agent get → .result.agent.interactive_ready == true` (`FLEET_INPUT_READY_TRIES × FLEET_INPUT_READY_SLEEP`, default 5×3s). If never confirmed the launcher proceeds anyway — the consumption ACK below is the real delivery gate.
+- **Consumption ACK**: after each send, poll every `FLEET_ACK_POLL_SECS` (default 3s) for up to `FLEET_ACK_POLLS_MAX` polls (default 8 → ~24s window) for ANY of: 1) `agent get` status left `idle` (working/thinking/blocked); 2) `agent get` revision moved; 3) the brief path visible in `agent read` (turn started); 4) the child session file(s) under `~/.pi/agent/sessions/<encoded-cwd>/` grew since the pre-prompt snapshot.
+- **Retry**: not consumed within the window → re-send, up to `FLEET_PROMPT_ATTEMPTS_MAX` (default 3), bounded (2s) waits between attempts.
+- **Fail-fast**: still no consumption → NO `brief delivered`; the task record is written `failed` (watcher → captain wake, durable relaunch possible), tab+pane closed, worktree released, launcher exits nonzero — never an empty pane left running.
+Headless smoke: `tests/smoke-prompt-ack.sh` (mocked herdr/treehouse, isolated state): a nogrow child → retries + fail-fast + cleanup with no spurious `brief delivered`; grow children (status / session-file only) → ACKed at the first poll with exactly one send.
+
 ### Loop bound (T-019)
 `bin/fleet-loop-helper.sh` gains `loop-init/loop-next/loop-final/loop-state`: the mechanical cycle counter `~/.pi/fleet/<loop>.loop.json` (`{cycle, maxCycles}`) is read/updated by the helper every cycle; `loop-next` REFUSES (exit 1, `refused:"maxCycles"`) beyond the bound and `loop-final` refuses any terminal verdict before `cycle == maxCycles` (`refused:"early-exit"`). The orchestrator template (`templates/fleet-loop-orchestrator.brief.md`) requires both calls, so the 3-cycle contract is machine-enforced, not prompt-only.
 
