@@ -150,12 +150,59 @@ EOF
 
 cat > "$MOCK_BIN/treehouse" <<'EOF'
 #!/usr/bin/env bash
-# Mock treehouse for the T-029 smoke — records calls, returns the fake worktree
-# path as the LAST stdout line (exactly what the launcher parses for `get`).
+# Mock treehouse for the T-029 smoke — records calls, serves the fake worktree
+# with the gh-8 lease contract: `get --json` (lease identity), `status --json`
+# (pool rows) and a GUARDED `return` (--if-lease-id/--if-lease-holder). The
+# pool state lives in $MOCK_POOL (JSON array of rows); `get` seeds it.
 set -u
 echo "TREEHOUSE $*" >> "${MOCK_TREE_LOG:?}"
 case "${1:-}" in
-  get) printf '%s\n' "${MOCK_WT_PATH:?}" ;;
+  get)
+    shift
+    holder=""
+    want_json=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --lease-holder) holder="$2"; shift 2 ;;
+        --json) want_json=1; shift ;;
+        *) shift ;;
+      esac
+    done
+    [[ -n "$holder" ]] || holder="pi-fleet:mock"
+    if [[ -n "$want_json" ]]; then
+      printf '{"path":"%s","lease_id":"%s","lease_holder":"%s"}\n' "${MOCK_WT_PATH:?}" "${MOCK_LEASE_ID:-mock-lease-1}" "$holder"
+    else
+      printf '%s\n' "${MOCK_WT_PATH:?}"
+    fi
+    jq -nc --arg p "${MOCK_WT_PATH:?}" --arg id "${MOCK_LEASE_ID:-mock-lease-1}" --arg h "$holder" \
+      '[{name:"1",path:$p,status:"leased",lease_id:$id,lease_holder:$h,leased_at:"x"}]' \
+      > "${MOCK_POOL:?}"
+    ;;
+  status)
+    cat "${MOCK_POOL:?}" 2>/dev/null || echo '[]'
+    ;;
+  return)
+    # args: --force --if-lease-id <id>|<holder> <path>
+    id=""; h=""; path=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --if-lease-id) id="$2"; shift 2 ;;
+        --if-lease-holder) h="$2"; shift 2 ;;
+        --force) shift ;;
+        *) path="$1"; shift ;;
+      esac
+    done
+    row="$(cat "${MOCK_POOL:?}" 2>/dev/null | jq -c --arg p "$path" '.[] | select(.path==$p)' 2>/dev/null)"
+    if [[ -z "$row" ]]; then echo "already released"; exit 3; fi
+    live_id="$(printf '%s' "$row" | jq -r '.lease_id // ""' 2>/dev/null)"
+    live_h="$(printf '%s' "$row" | jq -r '.lease_holder // ""' 2>/dev/null)"
+    if [[ -n "$id" && "$live_id" != "$id" ]] || [[ -n "$h" && "$live_h" != "$h" ]]; then
+      echo "guard mismatch"; exit 3
+    fi
+    cat "${MOCK_POOL:?}" | jq --arg p "$path" '[.[] | select(.path != $p)]' > "${MOCK_POOL:?}.tmp"
+    mv "${MOCK_POOL:?}.tmp" "${MOCK_POOL:?}"
+    echo "returned ok"
+    ;;
 esac
 exit 0
 EOF
@@ -204,6 +251,8 @@ scenario_env() {  # <mode> <tid> → prints the env list for the launcher run
     "MOCK_SESSION_FILE=$SESS_DIR/session.jsonl" \
     "MOCK_KILL_FILE=$SCRATCH/$tid.kill" \
     "MOCK_WT_PATH=$WT" \
+    "MOCK_POOL=$SCRATCH/$tid.pool.json" \
+    "MOCK_LEASE_ID=mock-lease-$tid" \
     "FLEET_STARTUP_WAIT_TRIES=2" \
     "FLEET_STARTUP_WAIT_SLEEP=1" \
     "HOME=$HOME_DIR" \

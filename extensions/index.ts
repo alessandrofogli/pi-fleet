@@ -115,6 +115,27 @@ let lastGroupTime = 0;
 let lastGroupSize = 0;
 
 const ACTIVE_STATES = new Set(["spawning", "running", "needs_input"]);
+// gh-8: cleanup-state vocabulary of the shared cleanup owner (issue #8 Phase 0.1)
+type CleanupResult = "unknown" | "pending" | "released" | "already_released" | "conflict" | "failed";
+interface CleanupAttempt {
+  at: number;                 // ms epoch
+  result: CleanupResult;
+  guard: string;              // "lease-id" | "lease-holder" | "none"
+  guardValue: string;
+  exitStatus: number | null;  // real treehouse return exit status (never suppressed)
+  output?: string;            // redacted raw output (truncated, secrets stripped)
+  reason?: string;
+}
+interface CleanupRecord {
+  taskId: string;
+  path?: string;
+  leaseId?: string | null;
+  leaseHolder?: string;
+  guardKind?: string;
+  lastResult: CleanupResult;
+  lastResultAt?: number;
+  attempts: CleanupAttempt[];
+}
 
 // ------------------------------------------------------------------ types ---
 type TaskState = "spawning" | "running" | "done" | "failed" | "aborted" | "needs_input";
@@ -125,6 +146,18 @@ interface TaskStateFile {
   project?: string;
   worktree?: boolean;
   cwd?: string;
+  // gh-8: canonical persisted worktree path — never derived from cwd alone
+  // (historical task records can share a physical path, so ownership matching
+  // uses the persisted lease identity + path, not the path alone).
+  worktreePath?: string;
+  // gh-8: durable lease identity persisted at ACQUISITION (issue #8 Phase 0.2):
+  // exact holder `pi-fleet:<task-id>`, the treehouse lease id (when returned by
+  // `treehouse get --json`), the acquisition timestamp, and the cleanup
+  // attempt/result history (written by bin/fleet-cleanup.sh).
+  leaseId?: string | null;
+  leaseHolder?: string;
+  leaseAcquiredAt?: number;
+  cleanup?: CleanupRecord;
   briefFile?: string;
   state: TaskState;
   startedAt?: number;
@@ -277,6 +310,36 @@ function runHerdr(args: string[], timeoutMs = 20_000): Promise<{ ok: boolean; ou
   });
 }
 
+// gh-8: invoke the ONE shared cleanup owner (bin/fleet-cleanup.sh) for a task.
+// The owner loads the persisted path + lease identity, re-reads treehouse
+// status, returns ONLY with the exact guard and persists the result
+// (released|already_released|conflict|pending|failed) in <task-id>.cleanup.json
+// + the state `.cleanup` field — so launcher, fleet_abort, crash recovery and
+// the reconciler all converge on the same durable record (issue #8 Phase 2/4).
+// `classifyOnly` = report-only pass (default for reconciliation; guarded
+// release requires FLEET_RECONCILE_RELEASE=1 or the launcher/abort paths).
+function runCleanupOwner(taskId: string, classifyOnly: boolean): CleanupRecord | null {
+  const script = join(EXT_DIR, "..", "bin", "fleet-cleanup.sh");
+  const args = [script, taskId, ...(classifyOnly ? ["--classify-only"] : [])];
+  try {
+    const res = spawnSync("bash", args, {
+      env: { ...process.env, FLEET_STATE_HOME: STATE_HOME },
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+    // Owner exit codes are classification metadata (0 = record persisted, 1 =
+    // record write failed, 2 = usage/missing record): the durable record file
+    // is the source of truth, never the exit code. Only a spawn error/timeout
+    // (res.error) is a real failure → null.
+    if (res.error) return null;
+    const recordPath = join(STATE_HOME, `${taskId}.cleanup.json`);
+    if (!existsSync(recordPath)) return null;
+    return JSON.parse(readFileSync(recordPath, "utf8")) as CleanupRecord;
+  } catch {
+    return null; // fail soft: the owner's durable record is the ack
+  }
+}
+
 // ------------------------------------------------------------- launcher ----
 interface FleetLaunchParams {
   title: string;
@@ -303,6 +366,12 @@ interface FleetLaunchParams {
 }
 
 function spawnLauncher(taskId: string, title: string, briefPath: string, params: FleetLaunchParams): { ok: boolean; error?: string; logPath?: string } {
+  // gh-8 (comments only — NO functional change): the lease identity (worktreePath/
+  // leaseId/leaseHolder/leaseAcquiredAt) is NOT written here — the launcher
+  // persists it AFTER `treehouse get` in its own state heredoc (the acquisition
+  // happens inside herdr-launch.sh §2, before the task state is written), and
+  // the cleanup owner (bin/fleet-cleanup.sh) reads it from the state at release
+  // time. Keeping this function byte-neutral preserves the fleet_launch contract.
   const args = [LAUNCHER, title, `@${briefPath}`, "--task-id", taskId, "--project", params.project];
   if (params.worktree === false) args.push("--no-worktree");
   if (params.model) args.push("--model", params.model);
@@ -377,7 +446,13 @@ function formatTaskLine(t: TaskStateFile, groupCounts?: Map<string, { done: numb
     const prNum = t.prUrl.match(/\/pull\/(\d+)/)?.[1];
     prS = prNum ? ` (pr:#${prNum})` : ` (pr:${t.prUrl.length > 60 ? t.prUrl.slice(0, 57) + "…" : t.prUrl})`;
   }
-  return `- **${t.title ?? t.id}** [${t.state}]${inbox}${grp}${gateS}${prS}${dur}${sum} — ${t.project ?? ""}`;
+  // gh-8: observability — surface terminal tasks with a non-final cleanup (the
+  // dashboard signal of issue #8 Phase 5: terminal tasks with pending cleanup).
+  let clS = "";
+  if (t.cleanup && !ACTIVE_STATES.has(t.state) && t.cleanup.lastResult && t.cleanup.lastResult !== "released" && t.cleanup.lastResult !== "already_released") {
+    clS = ` (cleanup:${t.cleanup.lastResult})`;
+  }
+  return `- **${t.title ?? t.id}** [${t.state}]${inbox}${grp}${gateS}${prS}${clS}${dur}${sum} — ${t.project ?? ""}`;
 }
 
 function sendGroupDigest(pi: ExtensionAPI, groupId: string, results: GroupTaskInfo[]): void {
@@ -463,10 +538,49 @@ function sendAttention(pi: ExtensionAPI, task: TaskStateFile, subject: string): 
  * Reconcile at startup: active tasks (running/needs_input/spawning) whose herdr
  * pane no longer exists are zombies (restart, crash, pilot closed the tab).
  * If the done-marker exists → done, otherwise failed. Avoids phantom wakes.
+ *
+ * gh-8 (issue #8 Phase 3/4): the reconciler is Treehouse-aware and NEVER
+ * auto-releases active tasks. Two passes:
+ *   1. TERMINAL tasks (done/failed/aborted) with a persisted worktree identity
+ *      → run the shared cleanup owner (bin/fleet-cleanup.sh) to classify the
+ *      live lease: released / already_released / conflict / pending / failed,
+ *      joined by exact path + lease id (or exact holder when no lease id). By
+ *      default the pass is REPORT-ONLY (--classify-only): guarded release is
+ *      enabled only with FLEET_RECONCILE_RELEASE=1 (Phase-7 rollout gate). A
+ *      record WITHOUT a persisted lease identity is never released (operator
+ *      review); duplicate historical records can never cause path-only
+ *      cleanup because the owner requires the exact identity match.
+ *   2. ACTIVE tasks → keep the legacy zombie re-classification (done/failed/
+ *      aborted markers), which only changes the TASK outcome — it never
+ *      touches the worktree lease. The lease of a re-classified terminal task
+ *      is then handled by pass 1 on the next reconciliation.
  */
 async function reconcileStaleTasks(scopeTaskId?: string): Promise<void> {
   const all = scopeTaskId ? watchedTasks(scopeTaskId) : listTasks();
   const tasks = all.filter((t) => ACTIVE_STATES.has(t.state));
+  // --- gh-8 pass 1: terminal-task Treehouse-aware cleanup classification ---
+  const autoRelease = process.env.FLEET_RECONCILE_RELEASE === "1";
+  const terminal = all.filter((t) => !ACTIVE_STATES.has(t.state) && !!t.worktreePath && !!(t.leaseId || t.leaseHolder));
+  if (terminal.length > 0) {
+    const metrics = { pending: 0, released: 0, already_released: 0, conflict: 0, failed: 0, unknown: 0, activeSkipped: 0 };
+    for (const t of terminal) {
+      try {
+        const rec = runCleanupOwner(t.id, !autoRelease);
+        const r = rec?.lastResult;
+        if (r === "released" || r === "already_released") metrics[r]++;
+        else if (r === "conflict" || r === "failed") metrics[r]++;
+        else if (r === "pending") metrics.pending++;
+        else metrics.unknown++;
+      } catch { metrics.unknown++; /* fail soft: reconcile must never break the watcher */ }
+    }
+    metrics.activeSkipped = all.filter((t) => ACTIVE_STATES.has(t.state) && !!t.worktreePath).length;
+    console.warn(
+      `[pi-fleet reconcile] terminal cleanup classification: ` +
+        `${metrics.released} released, ${metrics.already_released} already_released, ${metrics.conflict} conflict, ` +
+        `${metrics.failed} failed, ${metrics.pending} pending, ${metrics.unknown} unknown ` +
+        `(auto-release ${autoRelease ? "ON" : "OFF (classify-only)"}; ${metrics.activeSkipped} active tasks never touched)`,
+    );
+  }
   if (tasks.length === 0) return;
   const res = await runHerdr(["agent", "list"], 10_000);
   if (!res.ok) return;
@@ -1468,10 +1582,16 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
         return toolDenial("fleet_abort", denied, { taskId: params.id });
       }
       let state = "not_found";
+      let cleanup: CleanupRecord | null = null;
       if (task) {
+        // gh-8: the abort intent is written durably FIRST (the launcher, if
+        // alive, observes it as an idempotent request and converges on the same
+        // cleanup record — both callers share the owner's lock + exact guard,
+        // so concurrent abort and completion can never double-release).
         writeFileSync(join(STATE_HOME, `${task.id}.abort`), `${Date.now()}\n`);
         // Dedicated tab in the fleet workspace (or legacy task split pane):
-        // close both when present, tolerating failures.
+        // close both when present, tolerating failures. UI close BEFORE the
+        // guarded return (Treehouse process-termination ordering).
         if (task.paneId) await runHerdr(["pane", "close", task.paneId], 10_000);
         if (task.tabId) await runHerdr(["tab", "close", task.tabId], 10_000);
         if (task.state === "running" || task.state === "needs_input" || task.state === "spawning") {
@@ -1481,11 +1601,23 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
           // so the audit trail also covers abort via tool (T-004 acceptance criterion)
           try { getFleetOutcomesSync()?.appendOutcome(STATE_HOME, task); } catch { /* best-effort */ }
         }
+        // gh-8: own the cleanup (or await its durable ack): the shared owner
+        // persists <task-id>.cleanup.json + the state `.cleanup` record, so the
+        // report carries the REAL cleanup outcome instead of a claim. If the
+        // owner is unavailable, the durable ack is the launcher's own release
+        // (same owner) or the persisted record on a later pass — we never claim
+        // "released" without the record.
+        cleanup = runCleanupOwner(task.id, false);
         state = task.state;
       }
+      const cleanupNote = cleanup
+        ? `cleanup: ${cleanup.lastResult}`
+        : task && (task.worktreePath || task.cwd)
+          ? "cleanup: unknown (owner unavailable — record absent, launcher/reconciler owns the guarded release)"
+          : "no worktree on record";
       return {
-        content: [{ type: "text", text: state === "aborted" ? `Task ${params.id} aborted (pane closed, worktree being released).` : `Task ${params.id}: state ${state}.` }],
-        details: { taskId: params.id, state },
+        content: [{ type: "text", text: state === "aborted" ? `Task ${params.id} aborted (pane closed, ${cleanupNote}).` : `Task ${params.id}: state ${state} (${cleanupNote}).` }],
+        details: { taskId: params.id, state, cleanup: cleanup?.lastResult ?? null },
       };
     },
   });
