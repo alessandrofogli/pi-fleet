@@ -211,6 +211,15 @@ if [[ -n "$RESUME_TASK_ID" ]]; then
   USE_WORKTREE=0
   TASK_CWD="$RESUME_CWD"
   WT_PATH="$RESUME_CWD"   # final cleanup releases the (pre-existing) lease
+  # gh-8: the lease identity was persisted at the original acquisition — re-load
+  # it so the log reflects the durable identity (the cleanup owner reads the
+  # state itself; this is only for observability).
+  RESUME_LEASE_ID="$(jq -r '.leaseId // ""' "$RESUME_STATE_JSON" 2>/dev/null || true)"
+  if [[ -n "$RESUME_LEASE_ID" ]]; then
+    log "resume: lease identity preserved ($RESUME_LEASE_ID)"
+  else
+    log "resume: no persisted lease id — holder guard pi-fleet:$RESUME_TASK_ID for cleanup"
+  fi
   # T-019: a resumed child keeps its registry identity: nested opt-in, depth and
   # the mechanical gate are derived from the existing state, not from new flags.
   _nested="$(jq -r '.nested // false' "$RESUME_STATE_JSON" 2>/dev/null || echo false)"
@@ -317,18 +326,72 @@ if [[ -n "$RESUME_TASK_ID" ]]; then
   WT_PATH="$RESUME_CWD"
 fi
 if [[ "$USE_WORKTREE" == 1 ]]; then
-  WT_OUT="$(cd "$PROJECT" && treehouse get --lease --no-fetch --lease-holder "pi-fleet:$TASK_ID" 2>&1)" \
+  # gh-8: acquisition returns BOTH the worktree path and the lease identity
+  # (--json). The exact identity (path + holder + lease id + timestamp) is
+  # persisted with the task record BEFORE any child work begins, so cleanup can
+  # prove ownership with the exact `--if-lease-id` guard. Older treehouse
+  # versions without --json keep the classic path-only output → leaseId empty
+  # and the exact-holder guard is used instead.
+  WT_OUT="$(cd "$PROJECT" && treehouse get --lease --no-fetch --lease-holder "pi-fleet:$TASK_ID" --json 2>&1)" \
+    || WT_OUT="$(cd "$PROJECT" && treehouse get --lease --no-fetch --lease-holder "pi-fleet:$TASK_ID" 2>&1)" \
     || { herr "treehouse get failed for '$PROJECT': $WT_OUT"; exit 1; }
-  WT_PATH="${WT_OUT##*$'\n'}"   # the path is the last line
-  [[ -d "$WT_PATH" ]] || { herr "invalid worktree: $WT_PATH"; exit 1; }
+  WT_LEASE_ID=""
+  WT_PATH=""
+  if printf '%s' "$WT_OUT" | jq -e . >/dev/null 2>&1; then
+    WT_PATH="$(printf '%s' "$WT_OUT" | jq -r 'if type=="array" then (.[0].path // "") elif type=="object" then (.path // .lease.path // .result.path // "") else "" end' 2>/dev/null || true)"
+    WT_LEASE_ID="$(printf '%s' "$WT_OUT" | jq -r 'if type=="array" then (.[0].lease_id // "") elif type=="object" then (.lease_id // .lease.lease_id // .result.lease_id // "") else "" end' 2>/dev/null || true)"
+    if [[ -z "$WT_PATH" ]]; then
+      # a JSON acquisition record WITHOUT a resolvable path is ambiguous:
+      # reject it (the held lease stays recoverable via status join by holder).
+      herr "ambiguous treehouse acquisition (no path in the JSON record): $WT_OUT"
+      exit 1
+    fi
+  else
+    # legacy path-only stdout — the path is the last line (banners go to stderr)
+    WT_PATH="${WT_OUT##*$'\n'}"
+    WT_LEASE_ID=""
+  fi
+  [[ -d "$WT_PATH" ]] || { herr "invalid worktree: $WT_PATH (acquisition: ${WT_OUT:0:160})"; exit 1; }
   TASK_CWD="$WT_PATH"
-  log "worktree: $WT_PATH"
+  if [[ -n "$WT_LEASE_ID" ]]; then
+    log "worktree: $WT_PATH (lease $WT_LEASE_ID, holder pi-fleet:$TASK_ID)"
+  else
+    log "worktree: $WT_PATH (no lease id — holder guard pi-fleet:$TASK_ID)"
+  fi
 fi
 
+# gh-8: ONE shared idempotent cleanup owner (bin/fleet-cleanup.sh), used by
+# EVERY release path. The task UI (pane/tab) MUST be closed BEFORE this runs
+# (Treehouse's process-termination ordering). The owner loads the persisted
+# path + lease identity, re-reads `treehouse status --json`, returns ONLY with
+# the exact guard (--if-lease-id preferred, --if-lease-holder fallback), never
+# suppresses the exit status, and persists released|already_released|conflict|
+# pending|failed in <task-id>.cleanup.json + the state `.cleanup` field. Local
+# ownership (WT_PATH) is dropped ONLY on a confirmed release; on failure the
+# lease stays owned so a later reconciler/manual pass converges guarded.
 release_worktree() {
   [[ -z "$WT_PATH" ]] && return 0
-  (cd "$PROJECT" && treehouse return "$WT_PATH" 2>&1 | sed 's/^/  treehouse: /' >&2) || true
-  WT_PATH=""
+  local cleanup_bin="$SCRIPT_DIR/fleet-cleanup.sh" result
+  [[ -n "${FLEET_CLEANUP_BIN:-}" ]] && cleanup_bin="$FLEET_CLEANUP_BIN"
+  if [[ ! -x "$cleanup_bin" ]]; then
+    herr "cleanup owner not found/executable: $cleanup_bin — worktree NOT released, ownership kept"
+    return 1
+  fi
+  "$cleanup_bin" "$TASK_ID"
+  local rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    herr "cleanup owner failed (rc=$rc): worktree ownership kept ($WT_PATH)"
+    return 1
+  fi
+  result="$(jq -r '.lastResult // "unknown"' "$STATE_HOME/$TASK_ID.cleanup.json" 2>/dev/null || echo unknown)"
+  case "$result" in
+    released|already_released)
+      log "worktree released ($result): $WT_PATH"
+      WT_PATH="" ;;
+    *)
+      log "worktree release not confirmed ($result): local ownership kept ($WT_PATH)" ;;
+  esac
+  return 0
 }
 
 # Child model: pi's default without --model is the first model of the
@@ -385,6 +448,10 @@ cat > "$STATE_JSON.tmp" <<EOF
   "project": "$PROJECT",
   "worktree": ${USE_WORKTREE},
   "cwd": "$TASK_CWD",
+  "worktreePath": "$TASK_CWD",
+  "leaseId": $(jq -Rn --arg v "${WT_LEASE_ID:-}" '$v'),
+  "leaseHolder": "pi-fleet:$TASK_ID",
+  "leaseAcquiredAt": $(date +%s)000,
   "briefFile": "$BRIEF_PATH",
   "state": "spawning",
   "startedAt": $(date +%s)000,
@@ -438,8 +505,11 @@ log "fleet tab (sidebar only): $TAB_ID | pane: $PANE_ID"
 add_pane_ids
 
 # Error cleanup: ALWAYS pane/tab before treehouse return (return kills
-# the processes in the worktree, including the pane shell).
-trap 'log "interrotto: pulisco..."; close_tab; release_worktree; exit 130' INT TERM
+# the processes in the worktree, including the pane shell). gh-8: on a signal
+# the task is marked failed FIRST (unless already terminal) so the shared
+# cleanup owner never sees an "active" task — active tasks are never
+# auto-released (the same rule a reconciler must respect).
+trap 'close_tab; _sig_st="$(jq -r ".state // \"\"" "$STATE_JSON" 2>/dev/null || true)"; case "$_sig_st" in done|failed|aborted) ;; *) fail_task "interrupted by signal — launcher teardown" ;; esac; release_worktree; exit 130' INT TERM
 
 # ------------------------------------------------------- 5.1 CHILD_PROMPT build ----
 # T-029: the brief is delivered as pi's NATIVE initial request — pi's interactive
@@ -608,6 +678,87 @@ else
   log "child didn't leave idle within ${STARTUP_WAIT_TRIES}×${STARTUP_WAIT_SLEEP}s (fail-soft: no re-send; the done-wait §7 liveness gate flags an empty/frozen pane)"
 fi
 
+# ------------------------------------------- gh-8: durable artifact bundle ----
+# The done-marker lives in the TRANSIENT <task-id>.done.json, and a scout's
+# report.md lives INSIDE the worktree (not durable after return/reset). Before
+# any teardown/return, the task's artifacts are persisted atomically OUTSIDE the
+# worktree (issue #8 Phase 1):
+#   <task-id>.result.json    outcome + summary + changed files + FULL original
+#                            done-marker payload (audit) + report metadata
+#   <task-id>.findings.json  validated findings (BLOCKING/NON_BLOCKING)
+#   <task-id>.report.md      copy of the scout report when reportPath is present
+#   <task-id>.cleanup.json   lease identity + cleanup attempts (cleanup owner)
+# The done-marker payload is validated and written BEFORE the transient marker
+# is consumed; on persistence failure the task is NOT finalized (cleanup stays
+# pending — the reconciler/manual pass retries later).
+ARTIFACTS_TMP_MARKER="$STATE_HOME/$TASK_ID.result.json.tmp"
+
+_artifact_now() { printf '%s' "$(date +%s)000"; }
+_artifact_sha256() {  # <file> → sha256 hex or "unavailable"
+  local f="$1"
+  command -v sha256sum >/dev/null 2>&1 && { sha256sum "$f" 2>/dev/null | awk '{print $1}'; return; }
+  command -v shasum >/dev/null 2>&1 && { shasum -a 256 "$f" 2>/dev/null | awk '{print $1}'; return; }
+  echo "unavailable"
+}
+
+# Validates the findings array (review-loop-protocol done-marker contract) and
+# persists <task-id>.findings.json. Returns 0 on success.
+persist_findings() {  # <raw-done-json>
+  local raw="$1" ffile="$STATE_HOME/$TASK_ID.findings.json"
+  local finds valid blocking nonblocking
+  finds="$(printf '%s' "$raw" | jq -c '.findings // []' 2>/dev/null || echo '[]')"
+  valid="$(printf '%s' "$finds" | jq -e 'type=="array"' >/dev/null 2>&1 && printf '%s' "$finds" | jq '[.[] | select((has("id") and has("severity")))] | length' 2>/dev/null || echo 0)"
+  blocking="$(printf '%s' "$finds" | jq '[.[] | select(.severity=="BLOCKING")] | length' 2>/dev/null || echo 0)"
+  nonblocking="$(printf '%s' "$finds" | jq '[.[] | select(.severity=="NON_BLOCKING")] | length' 2>/dev/null || echo 0)"
+  jq -nc --argjson finds "$finds" --argjson valid "$valid" --argjson blocking "$blocking" \
+    --argjson nonblocking "$nonblocking" --arg at "$(_artifact_now)" --arg id "$TASK_ID" \
+    '{taskId:$id, at:($at|tonumber), validated:(($valid|tonumber) >= (($finds|length) > 0)),
+      counts:{blocking:$blocking, non_blocking:$nonblocking}, findings:$finds}' \
+    > "$ffile.tmp" 2>/dev/null && mv "$ffile.tmp" "$ffile" 2>/dev/null
+}
+
+# Persists the full artifact bundle. Called with the NORMALIZED fields parsed
+# from the done-marker PLUS the RAW done-marker payload. Returns 0 only when
+# every artifact write succeeded (atomic tmp+rename per file).
+persist_artifacts() {  # <status> <summary> <files-json> <reportpath> <raw-done-json>
+  local status="$1" summary="$2" files="$3" reportpath="$4" raw="$5"
+  local rfile="$STATE_HOME/$TASK_ID.result.json"
+  local report_meta="{}" src
+  # scout report copy (reportPath is a SOURCE location, never the durable artifact)
+  if [[ -n "$reportpath" ]]; then
+    src="$TASK_CWD/$reportpath"
+    if [[ -f "$src" ]]; then
+      if cp "$src" "$STATE_HOME/$TASK_ID.report.md.tmp" 2>/dev/null \
+         && mv "$STATE_HOME/$TASK_ID.report.md.tmp" "$STATE_HOME/$TASK_ID.report.md" 2>/dev/null; then
+        report_meta="$(jq -nc --arg p "$reportpath" --arg f "$STATE_HOME/$TASK_ID.report.md" --arg b "$(wc -c < "$STATE_HOME/$TASK_ID.report.md" 2>/dev/null | tr -d ' ')" \
+          --arg h "$(_artifact_sha256 "$STATE_HOME/$TASK_ID.report.md")" \
+          '{copied:true, sourcePath:$p, storedAt:$f, bytes:($b|tonumber), sha256:$h}')"
+      else
+        report_meta="$(jq -nc --arg p "$reportpath" '{copied:false, reason:"copy failed inside the worktree", sourcePath:$p}')"
+      fi
+    else
+      report_meta="$(jq -nc --arg p "$reportpath" '{copied:false, reason:"report file missing", sourcePath:$p}')"
+    fi
+  fi
+  jq -nc --arg id "$TASK_ID" --arg at "$(_artifact_now)" --arg st "$status" --arg sum "$summary" \
+    --argjson files "$files" --arg rp "$reportpath" --argjson meta "$report_meta" \
+    --argjson raw "$raw" --arg ff "$TASK_ID.findings.json" \
+    '{taskId:$id, at:($at|tonumber), status:$st, summary:$sum, changedFiles:$files,
+      reportPath:$rp, report:$meta, findingsFile:$ff,
+      doneMarker:$raw}' \
+    > "$rfile.tmp" 2>/dev/null && mv "$rfile.tmp" "$rfile" 2>/dev/null || return 1
+  persist_findings "$raw" || return 1
+  return 0
+}
+
+# Failure paths without a done-marker still persist their reason durably.
+persist_failure_result() {  # <reason>
+  local reason="$1" rfile="$STATE_HOME/$TASK_ID.result.json"
+  jq -nc --arg id "$TASK_ID" --arg at "$(_artifact_now)" --arg reason "$reason" \
+    '{taskId:$id, at:($at|tonumber), status:"failed", failureReason:$reason}' \
+    > "$rfile.tmp" 2>/dev/null && mv "$rfile.tmp" "$rfile" 2>/dev/null
+}
+
 # ------------------------------------------------------- 7. done-marker wait ----
 # Liveness: if the child (agent in the pane) disappears without writing a marker
 # (crash, closed tab, session ended by the captain), do NOT keep waiting
@@ -633,12 +784,26 @@ while :; do
     if ! printf '%s' "$RESULT" | jq -e . >/dev/null 2>&1; then
       log "done.json not valid JSON (likely literal newlines in the summary): best-effort fallback"
       STATUS="done"; SUMMARY="$RESULT"; FILES="[]"; REPORTPATH=""; CHILD_GATE_ROUNDS=0
+      RAW_DONE="$(jq -nc --arg raw "$RESULT" '{status:"done", summary:$raw, changedFiles:[], _rawFallback:true}' 2>/dev/null || echo '{}')"
     else
       STATUS="$(printf '%s' "$RESULT" | jq -r '.status // "failed"')"
       SUMMARY="$(printf '%s' "$RESULT" | jq -r '.summary // ""')"
       FILES="$(printf '%s' "$RESULT" | jq -c '.changedFiles // []')"
       REPORTPATH="$(printf '%s' "$RESULT" | jq -r '.reportPath // ""')"
       CHILD_GATE_ROUNDS="$(printf '%s' "$RESULT" | jq -r '.gate.rounds // 0' 2>/dev/null || echo 0)"
+      RAW_DONE="$RESULT"
+    fi
+    # gh-8: validate + persist the artifact bundle BEFORE consuming the transient
+    # marker. On persistence failure the task is NOT finalized: state=failed,
+    # cleanup stays pending (no release), the reconciler/manual pass retries.
+    if ! persist_artifacts "$STATUS" "$SUMMARY" "$FILES" "$REPORTPATH" "$RAW_DONE"; then
+      herr "artifact persistence failed: task NOT finalized, cleanup stays pending (no release)"
+      jq --arg done "$(date +%s)000" \
+        --arg sum "artifact persistence failed — task not finalized, worktree cleanup pending (see launcher log)" \
+        '.state="failed" | .doneAt=($done|tonumber) | .summary=$sum | .changedFiles=[]' "$STATE_JSON" \
+        > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
+      rm -f "$DONE_PATH"
+      exit 1
     fi
     log "completed: $STATUS"
     printf '
@@ -674,6 +839,9 @@ while :; do
   fi
   if [[ $(date +%s) -gt $DEADLINE ]]; then
     herr "timeout after ${TIMEOUT_MIN}min: killing the task"
+    # gh-8: record the timeout durably before teardown (no done-marker was ever
+    # received; the custody of the lease is handed to the cleanup owner)
+    persist_failure_result "timeout after ${TIMEOUT_MIN}min — no done-marker received"
     set_state failed
     close_tab
     release_worktree
@@ -690,6 +858,8 @@ while :; do
     esac
     if (( MISS >= 2 )); then
       herr "the child ended without a done-marker (agent no longer detected): closing the task"
+      # gh-8: persist the failure reason durably before teardown
+      persist_failure_result "The child ended without writing the done-marker (agent/pane no longer present)."
       jq --arg done "$(date +%s)000" --arg sum "The child ended without writing the done-marker (agent/pane no longer present)." \
         '.state="failed" | .doneAt=($done|tonumber) | .summary=$sum' "$STATE_JSON" \
         > "$STATE_JSON.tmp" 2>/dev/null && mv "$STATE_JSON.tmp" "$STATE_JSON"
@@ -788,4 +958,9 @@ fi
 # ------------------------------------------------------- 8. cleanup ----
 close_tab
 release_worktree
-log "fine $TASK_ID"
+# gh-8 (Phase 5 observability): explicit task result + cleanup result, never
+# just "fine <task>" — the cleanup outcome (released|already_released|conflict|
+# pending|failed) is read from the durable record written by the shared owner.
+_FINAL_ST="$(jq -r '.state // "unknown"' "$STATE_JSON" 2>/dev/null || echo unknown)"
+_FINAL_CL="$(jq -r '.cleanup.lastResult // "unknown"' "$STATE_JSON" 2>/dev/null || echo unknown)"
+log "task $TASK_ID finalized (state=$_FINAL_ST, cleanup=$_FINAL_CL)"
