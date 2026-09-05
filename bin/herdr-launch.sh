@@ -533,7 +533,8 @@ rm -f "$CHILD_PROMPT_PATH" "${CHILD_PROMPT_PATH}.tmp."* 2>/dev/null || true
 PROMPT_TMP="$CHILD_PROMPT_PATH.tmp.$$"
 ( umask 077; printf '%s\n' "$CHILD_PROMPT" > "$PROMPT_TMP" ) \
   || { herr "cannot write the child prompt file: $PROMPT_TMP"; fail_task "child prompt file not writable"; close_tab; release_worktree; exit 1; }
-mv "$PROMPT_TMP" "$CHILD_PROMPT_PATH"
+mv "$PROMPT_TMP" "$CHILD_PROMPT_PATH" \
+  || { herr "cannot install the child prompt file: $PROMPT_TMP -> $CHILD_PROMPT_PATH"; fail_task "child prompt file not installable"; close_tab; release_worktree; exit 1; }
 # Guard BEFORE any herdr call: the path must be absolute, regular and readable —
 # a missing/unreadable prompt file must fail the task, NOT silently deliver an
 # empty initial request to the child.
@@ -545,7 +546,7 @@ case "$CHILD_PROMPT_PATH" in
       release_worktree
       exit 1 ;;
 esac
-if [[ ! -s "$CHILD_PROMPT_PATH" || ! -r "$CHILD_PROMPT_PATH" ]]; then
+if [[ ! -f "$CHILD_PROMPT_PATH" || ! -s "$CHILD_PROMPT_PATH" || ! -r "$CHILD_PROMPT_PATH" ]]; then
   herr "child prompt file missing/empty/unreadable: $CHILD_PROMPT_PATH"
   fail_task "child prompt file missing or unreadable"
   close_tab
