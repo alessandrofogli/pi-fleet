@@ -114,28 +114,15 @@ case "$BASH_TIMEOUT_S" in ''|*[!0-9]*) BASH_TIMEOUT_S=300 ;;
      fi ;;
 esac
 
-# T-029: the CHILD_PROMPT is delivered as pi's NATIVE initial request — `agent
-# start` carries `@<prompt-file>` in its argv and pi's interactive mode reads the
-# file and prompts the session BEFORE the main loop. `agent prompt` is never
-# called for the brief, so there is no delivery race to ACK. The only residual
-# check (fail-soft, NEVER re-sends) is that the child LEFT `idle` (started the
-# initial request); a frozen/empty pane is caught by the §7 done-wait liveness
-# gate. Env-overridable — the headless smoke tests/smoke-prompt-ack.sh drives
-# them down to keep the run fast:
-#   STARTUP_WAIT_TRIES × STARTUP_WAIT_SLEEP : bounded wait for the child to
-#     leave idle (status/revision/session-file growth) after `agent start`.
-STARTUP_WAIT_TRIES="${FLEET_STARTUP_WAIT_TRIES:-5}"
-STARTUP_WAIT_SLEEP="${FLEET_STARTUP_WAIT_SLEEP:-3}"
-clamp_int() {  # name min max — sanitize + clamp a numeric knob
-  local name="$1" min="$2" max="$3" v
-  eval "v=\${$name:-}"
-  case "$v" in ''|*[!0-9]*) v="$min" ;; esac
-  [[ "$v" -lt "$min" ]] && v="$min"
-  [[ "$v" -gt "$max" ]] && v="$max"
-  eval "$name=$v"
-}
-clamp_int STARTUP_WAIT_TRIES 1 20
-clamp_int STARTUP_WAIT_SLEEP 1 10
+# gh-7: the CHILD_PROMPT is delivered as pi's NATIVE initial request — `agent
+# start` carries `@<prompt-file>` in its argv and pi reads the file and prompts
+# the session BEFORE its main loop (`session.prompt(initialMessage)` in
+# dist/modes/interactive/interactive-mode.js, verified against the installed pi
+# 0.84.x). `agent prompt` is never called for the brief and there is NO
+# post-start readiness/ACK/session-file polling anymore: the prompt file is
+# fully materialized and validated BEFORE the call, so delivery is complete
+# when `agent start` returns. A frozen/empty pane is caught by the §7
+# done-wait liveness gate (agent_alive), exactly as before.
 
 # Marks failed on premature launcher exit (failed tab/agent/prompt):
 # without this the state stays 'spawning' and the task dies SILENTLY (the watcher
@@ -429,7 +416,7 @@ fi
 # ------------------------------------------------------- 3. state on disk ----
 STATE_JSON="$STATE_HOME/$TASK_ID.json"
 BRIEF_PATH="$STATE_HOME/tasks/$TASK_ID.brief.md"
-PROMPT_PATH="$STATE_HOME/tasks/$TASK_ID.prompt.md"
+CHILD_PROMPT_PATH="$STATE_HOME/$TASK_ID.child-prompt.md"
 DONE_PATH="$STATE_HOME/$TASK_ID.done.json"
 NEEDS_INPUT_PATH="$STATE_HOME/$TASK_ID.needs-input.json"
 
@@ -595,40 +582,69 @@ Respect it during delivery; if the brief asks for nothing explicit, behave accor
 
 The task is: $BRIEF_CONTENT"
 
-# The full child prompt, materialized for the native `@<file>` initial request.
-printf '%s\n' "$CHILD_PROMPT" > "$PROMPT_PATH"
-log "child prompt file: $PROMPT_PATH"
-
-# Portable "size<TAB>path" listing of the child session tree (used to detect
-# session-file growth — pi appends per turn, so size strictly increases).
-file_sizes() {  # <dir> → "size<TAB>path" per regular file (maxdepth 2)
-  local dir="$1" f sz
-  find "$dir" -type f -maxdepth 2 2>/dev/null | while IFS= read -r f; do
-    if [[ "$(uname)" == "Darwin" ]]; then
-      sz="$(stat -f '%z' "$f" 2>/dev/null)"
-    else
-      sz="$(stat -c '%s' "$f" 2>/dev/null)"
-    fi
-    [[ -n "$sz" ]] && printf '%s\t%s\n' "$sz" "$f"
-  done
+# -------------------------------------------------- 5.2 transient child-prompt file ----
+# The complete CHILD_PROMPT is materialized BEFORE `agent start` to a PRIVATE
+# absolute transient file under STATE_HOME (`<task-id>.child-prompt.md`):
+#   - atomic: unique tmp sibling (`.tmp.$$`) + mv (never a half-written file)
+#   - umask 077: readable only by the launcher user
+#   - per-task-id stale sweep: a SIGKILLed previous launcher can leave the file
+#     behind; we reclaim ONLY this task id's transient prompt + its tmp siblings
+#     (durable brief files under tasks/ are NEVER touched)
+#   - removed on EVERY terminal path (success, failure, abort, signal,
+#     timeout, relaunch handoff) via the EXIT trap below.
+remove_child_prompt() {
+  [[ -n "${CHILD_PROMPT_PATH:-}" ]] || return 0
+  rm -f "$CHILD_PROMPT_PATH" "${CHILD_PROMPT_PATH}.tmp."* 2>/dev/null || true
 }
+trap 'remove_child_prompt' EXIT
+# SIGKILL sweep (cannot be trapped — reclaim leftovers from a previous run of
+# this task id; the durable brief file is a different name and is NEVER removed).
+rm -f "$CHILD_PROMPT_PATH" "${CHILD_PROMPT_PATH}.tmp."* 2>/dev/null || true
+PROMPT_TMP="$CHILD_PROMPT_PATH.tmp.$$"
+( umask 077; printf '%s\n' "$CHILD_PROMPT" > "$PROMPT_TMP" ) \
+  || { herr "cannot write the child prompt file: $PROMPT_TMP"; fail_task "child prompt file not writable"; close_tab; release_worktree; exit 1; }
+mv "$PROMPT_TMP" "$CHILD_PROMPT_PATH" \
+  || { herr "cannot install the child prompt file: $PROMPT_TMP -> $CHILD_PROMPT_PATH"; fail_task "child prompt file not installable"; close_tab; release_worktree; exit 1; }
+# Guard BEFORE any herdr call: the path must be absolute, regular and readable —
+# a missing/unreadable prompt file must fail the task, NOT silently deliver an
+# empty initial request to the child.
+case "$CHILD_PROMPT_PATH" in
+  /*) : ;;
+  *)  herr "child prompt path not absolute: $CHILD_PROMPT_PATH"
+      fail_task "child prompt path not absolute"
+      close_tab
+      release_worktree
+      exit 1 ;;
+esac
+if [[ ! -f "$CHILD_PROMPT_PATH" || ! -s "$CHILD_PROMPT_PATH" || ! -r "$CHILD_PROMPT_PATH" ]]; then
+  herr "child prompt file missing/empty/unreadable: $CHILD_PROMPT_PATH"
+  fail_task "child prompt file missing or unreadable"
+  close_tab
+  release_worktree
+  exit 1
+fi
+if [[ -n "$RESUME_TASK_ID" ]]; then
+  log "resume: transient child prompt rebuilt for the resumed task"
+fi
+log "child prompt file: $CHILD_PROMPT_PATH ($(wc -c < "$CHILD_PROMPT_PATH" 2>/dev/null || echo 0) bytes)"
 
-# ------------------------------------------------------- 5.2 start pi with the prompt ----
-# T-029: the brief rides ALONG in the agent argv (`@$PROMPT_PATH`): pi reads the
-# file and prompts the session natively before its main loop. ZERO `agent prompt`
-# for the delivery. Pre-start evidence baselines (captured once — the native
-# initial turn begins DURING `agent start`, so the residual check below needs a
-# baseline to compare against).
-PRE_START_REVISION="$(herdr_cli agent get "$PANE_ID" 2>/dev/null | jq -r '.result.agent.revision // 0' 2>/dev/null)"
-SESSION_DIR="$HOME/.pi/agent/sessions/$(printf '%s' "$TASK_CWD" | sed 's|^/||; s|/|-|g; s|.*|--&--|')"
-SESSION_SNAPSHOT_BEFORE="$(file_sizes "$SESSION_DIR")"
+# ------------------------------------------------------- 5.3 start pi with the prompt ----
+# gh-7: the brief rides ALONG in the agent argv (`@$CHILD_PROMPT_PATH`) — exactly
+# ONE argv element after herdr's `--`, distinct from the `--model provider/id`
+# pair. herdr forwards agent args raw into pi's argv but REFUSES args it cannot
+# shell-encode safely (multi-line text with quotes/$/backticks →
+# invalid_agent_argument): hence the file indirection, NOT a positional message.
+# ZERO `agent prompt` for the brief; NO post-start readiness/ACK/session-file
+# polling — the initial request is born inside the pi process at `agent start`,
+# so delivery IS `agent start` returning OK. A frozen/empty pane is caught by
+# the §7 done-wait liveness gate (agent_alive), exactly as before.
 # UNIQUE agent name per task (herdr rejects duplicate names: agent_name_taken) and
 # retry on transient races (agent_pane_busy: pane shell not yet available right
 # after tab create, typical with closely-spaced parallel launches).
 AS_OUT=""
 OK=0
 for ((try = 1; try <= 4; try++)); do
-  AS_OUT="$(herdr_cli agent start "$AGENT_NAME" --kind pi --pane "$PANE_ID" -- "${MODEL_ARGS[@]}" "@$PROMPT_PATH")"
+  AS_OUT="$(herdr_cli agent start "$AGENT_NAME" --kind pi --pane "$PANE_ID" -- "${MODEL_ARGS[@]}" "@$CHILD_PROMPT_PATH")"
   if [[ $? -eq 0 ]]; then OK=1; break; fi
   herr "agent start: attempt $try/4 failed: ${AS_OUT:0:160}"
   sleep 3
@@ -640,43 +656,7 @@ if [[ $OK -ne 1 ]]; then
   release_worktree
   exit 1
 fi
-log "pi started in the pane (readiness ok)"
-log "brief delivered to the child (native initial request)"
-
-# -------------------------------------------------- 5.3 residual startup check (T-029) ----
-# With the native initial request the prompt CANNOT get lost (it is born inside
-# the pi process), so delivery is complete at `agent start` — the old send +
-# consumption-ACK + re-send machinery (§6b T-027) is GONE. The only residual
-# check is fail-soft and NEVER re-sends: a bounded wait for the child to leave
-# `idle` (evidence it started working the initial request). If it never does,
-# the launcher proceeds to the done-wait — a truly empty/frozen pane is caught
-# there by the §7 liveness gate (agent_alive), as before.
-startup_started() {  # evidence the child left idle (ANY one = started)
-  local out st rev now
-  out="$(herdr_cli agent get "$PANE_ID" 2>/dev/null)" || return 1
-  st="$(printf '%s' "$out" | jq -r '.result.agent.agent_status // ""' 2>/dev/null)"
-  [[ -n "$st" && "$st" != "idle" && "$st" != "unknown" ]] && return 0
-  rev="$(printf '%s' "$out" | jq -r '.result.agent.revision // 0' 2>/dev/null)"
-  if [[ "$rev" =~ ^[0-9]+$ ]] && [[ "$rev" -gt "$PRE_START_REVISION" ]] 2>/dev/null; then
-    return 0
-  fi
-  if [[ -d "$SESSION_DIR" ]]; then
-    now="$(file_sizes "$SESSION_DIR")"
-    [[ -n "$now" && "$now" != "$SESSION_SNAPSHOT_BEFORE" ]] && return 0
-  fi
-  return 1
-}
-STARTED=0
-for ((_try = 1; _try <= STARTUP_WAIT_TRIES; _try++)); do
-  if startup_started; then STARTED=1; break; fi
-  log "child not out of idle yet (attempt $_try/$STARTUP_WAIT_TRIES)"
-  [[ "$_try" -lt "$STARTUP_WAIT_TRIES" ]] && sleep "$STARTUP_WAIT_SLEEP"
-done
-if [[ "$STARTED" -eq 1 ]]; then
-  log "child left idle — processing the native initial request"
-else
-  log "child didn't leave idle within ${STARTUP_WAIT_TRIES}×${STARTUP_WAIT_SLEEP}s (fail-soft: no re-send; the done-wait §7 liveness gate flags an empty/frozen pane)"
-fi
+log "pi started in the pane (readiness ok) — native initial request handed to the child"
 
 # ------------------------------------------- gh-8: durable artifact bundle ----
 # The done-marker lives in the TRANSIENT <task-id>.done.json, and a scout's

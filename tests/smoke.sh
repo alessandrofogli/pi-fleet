@@ -7,6 +7,11 @@
 #   launcher (bin/herdr-launch.sh) → pi child in the herdr pane ("fleet" workspace,
 #   sidebar only) → done-marker on disk → final state on disk
 #
+# gh-7 native delivery: the complete CHILD_PROMPT rides the child's STARTUP as
+# pi's native initial request — the launcher materializes it at
+# $FLEET_STATE_HOME/<id>.child-prompt.md and passes it as exactly ONE @file argv
+# element after `agent start ... --` (no `agent prompt`, no ACK machinery).
+#
 # Isolation: FLEET_STATE_HOME points to /tmp/fleet-smoke-state-* → no file is
 # written in the real fleet (~/.pi/fleet). The real herdr workspace is used
 # (that's the point of the test: real chain), but the pane/tab is closed by the
@@ -98,7 +103,7 @@ log "[2/6] isolated state: FLEET_STATE_HOME=$STATE_DIR (real fleet ~/.pi/fleet i
 export FLEET_STATE_HOME="$STATE_DIR"
 
 # ---------------------------------------------------------------- [3/6] brief
-log "[3/6] short brief for the child ($BRIEF_FILE)"
+log "[3/6] short brief for the child ($BRIEF_FILE) — delivered as the native initial request (@file argv)"
 cat > "$BRIEF_FILE" <<'EOF'
 # T-008 smoke — minimal child task
 
@@ -129,7 +134,7 @@ else
   log "child model: launcher env chain (PI_PROVIDER/PI_MODEL or default)"
 fi
 
-log "[4/6] launching the launcher: internal timeout 5min, external timeout ${LAUNCH_TIMEOUT_S}s"
+log "[4/6] launching the launcher: internal timeout 5min, external timeout ${LAUNCH_TIMEOUT_S}s (native @<prompt-file> initial request)"
 run_with_timeout "$LAUNCH_TIMEOUT_S" \
   "$LAUNCHER" "smoke-$TS" "@$BRIEF_FILE" \
   --project "$SCRATCH" --no-worktree --task-id "$TASK_ID" --timeout-min 5 \
@@ -145,10 +150,12 @@ the task did not reach the done-marker in time — check herdr and the pane"
 fi
 
 # ---------------------------------------------------------------- [5/6] verifications
-log "[5/6] verifying outcome (state json, esito.txt, done-marker consumed)"
+log "[5/6] verifying outcome (state json, esito.txt, done-marker consumed, transient prompt removed)"
 
 STATE_JSON="$STATE_DIR/$TASK_ID.json"
 DONE_JSON="$STATE_DIR/$TASK_ID.done.json"
+CHILD_PROMPT_FILE="$STATE_DIR/$TASK_ID.child-prompt.md"
+BRIEF_FILE_ON_DISK="$STATE_DIR/tasks/$TASK_ID.brief.md"
 ESITO_FILE="$SCRATCH/esito.txt"
 FAILS=0
 
@@ -180,6 +187,20 @@ if [[ -f "$DONE_JSON" ]]; then
   FAILS=$((FAILS + 1)); log "FAIL: done-marker still present (not consumed): $DONE_JSON"
 else
   log "  done-marker: consumed (removed by the launcher)"
+fi
+
+# 5.4 native initial-request lifecycle: the transient child-prompt file was
+# written for the child AND removed by the launcher at exit; the durable brief
+# (tasks/<id>.brief.md) is NEVER deleted.
+if [[ -e "$CHILD_PROMPT_FILE" ]]; then
+  FAILS=$((FAILS + 1)); log "FAIL: transient child prompt still present (must be removed at exit): $CHILD_PROMPT_FILE"
+else
+  log "  transient child prompt: removed by the launcher (native @file consumed at startup)"
+fi
+if [[ -f "$BRIEF_FILE_ON_DISK" ]]; then
+  log "  durable brief file: kept (never removed by the transient cleanup)"
+else
+  FAILS=$((FAILS + 1)); log "FAIL: durable brief file missing: $BRIEF_FILE_ON_DISK"
 fi
 
 if [[ $FAILS -gt 0 ]]; then
