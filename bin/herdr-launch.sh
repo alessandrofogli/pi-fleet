@@ -691,8 +691,6 @@ fi
 # The done-marker payload is validated and written BEFORE the transient marker
 # is consumed; on persistence failure the task is NOT finalized (cleanup stays
 # pending — the reconciler/manual pass retries later).
-ARTIFACTS_TMP_MARKER="$STATE_HOME/$TASK_ID.result.json.tmp"
-
 _artifact_now() { printf '%s' "$(date +%s)000"; }
 _artifact_sha256() {  # <file> → sha256 hex or "unavailable"
   local f="$1"
