@@ -286,6 +286,7 @@ are available at every captain `session_start` (the startup log reports `captain
 | `fleet_learn` | `title`, `fact`, `implication?`, `opts?` (`tier`: `"aging"` \| `"perishable"` \| `"pinned"`, default `aging`; `expiry` required for `perishable`, e.g. "after the v0.4 deploy"). Appends a dated section to `learnings.md`; dedup by title in the last 24h (replaces the section instead of duplicating). |
 | `fleet_stow` | `dryRun?`, `verbose?` — memory pruning pass: stale → refresh or archive; dedup; budget. `dryRun: true` → report only, zero writes. |
 | `notify.sound` | Captain preference (captain.md) controlling the **audible reply**: a terminal bell (BEL) rings when the captain's user-visible turn completes — both direct replies and wake-and-report digests of children. `on` (default) \| `off` (silence). |
+| `calm` | Captain preference (captain.md) controlling **Calm mode** (gh-9, port of Firstmate's Quiet Mode): a quiet transcript while fleet tasks run — collapsed thinking, mid-turn working notes, pi-fleet wake/health user rows, visible `fleet_notice` rows and the wrapped built-in tool shells are hidden, and the stock Working… row becomes a static quiet line. `on` \| `off` (default). Toggle at runtime with `/fleet-calm`; presentation-only, never touches message data or task state. See *Calm mode* below. |
 
 **Audible reply (completion notification)** — when a fleet task completes, the child only writes its
 `<id>.done.json` marker and exits: **no sound ever comes from a child**. The bell fires **only from the
@@ -298,6 +299,36 @@ To silence it globally set the preference once (runtime-global, never in git):
 
 ```
 fleet_captain_pref set notify.sound off
+```
+
+### Calm mode
+
+**Calm mode** (gh-9, port of Firstmate's Quiet Mode) is a presentation-only toggle for the
+captain's own transcript while fleet tasks run — it changes **what you see**, never the messages
+(data/context/persistence are untouched). While active it hides the operational noise:
+
+- **collapsed thinking** and **mid-turn assistant working notes** (the final reply stays);
+- pi-fleet **user-role wake/health envelopes** (`FLEET WATCHER WAKE:` / `T-019 health watchdog (`);
+- the **visible `fleet_notice` custom rows** (`display: true` watcher wakes; the silent
+  `display:false` directives never rendered a row anyway);
+- the **wrapped built-in tool shells** (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` —
+  pi's standard colored shell is rebuilt on the render slot theme via `renderShell: "self"`
+  when calm is off, so toggling restores the exact stock frame);
+- the stock **Working…** row is replaced by a static quiet line `⠴ calm — working quietly`
+  (the animated boat from Firstmate is consciously **not** ported: timer-free, deterministic,
+  headless-testable).
+
+Toggle with the **`/fleet-calm`** command (kebab-case, matching `fleet-watch-arm-pi` — a bare
+`/calm` would be ambiguous when another extension registers the same name), or persist it with
+`fleet_captain_pref set calm on|off` (default `off`). The choice is re-read at every
+`session_start` (a sibling session toggling it applies at your next start). If a wrapped built-in
+is already provided by another extension, Calm warns and leaves the foreign tool intact. Missing
+presentation seams degrade with a diagnostic instead of crashing. Headless/partial-UI contexts
+(no `@earendil-works/pi-tui`, RPC/print modes) degrade tool-shell masking gracefully and keep the
+rest of Calm working. Tests: `tests/smoke-calm.sh`.
+
+```
+fleet_captain_pref set calm on
 ```
 
 **File format** (`key: value` lines, `#` comments, free `##` sections):
