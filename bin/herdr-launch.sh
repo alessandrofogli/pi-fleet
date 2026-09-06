@@ -106,6 +106,29 @@ mkdir -p "$STATE_HOME/tasks"
 log()  { printf '[fleet] %s\n' "$*"; }
 herr() { printf '[fleet] ERROR: %s\n' "$*" >&2; }
 
+# issue #13: single-captain / wave-ownership guard (fleet-captain-lib.sh).
+# Loaded here so the guard can run BEFORE the workspace/worktree sections (a
+# refused launch must NOT take a lease or open a pane).
+. "$SCRIPT_DIR/fleet-captain-lib.sh"
+
+# issue #13: a refused launch writes a minimal FAILED task record (so the
+# captain sees the reason in fleet_status and the extension's task is not a
+# phantom 'spawning') and exits 1 — no lease, no pane.
+refuse_launch() {
+  local why="$1"
+  herr "refusing launch: $why"
+  if [[ -n "${TASK_ID:-}" ]]; then
+    jq -nc --arg id "$TASK_ID" --arg p "$PROJECT" --arg t "${TITLE:-}" \
+      --arg g "${EFFECTIVE_GROUP_ID:-$TASK_ID}" --arg gl "${GROUP_LABEL:-}" \
+      --arg sum "$why" --arg cap "$(fleet_captain_id)" --arg now "$(date +%s)000" \
+      '{id:$id, project:$p, title:$t, groupId:$g, groupLabel:$gl, state:"failed",
+        deliveryPosture:"refused", startedAt:($now|tonumber), doneAt:($now|tonumber),
+        lastBeatAt:($now|tonumber), summary:$sum, captainId:$cap}' \
+      > "$STATE_HOME/$TASK_ID.json.tmp" 2>/dev/null && mv "$STATE_HOME/$TASK_ID.json.tmp" "$STATE_HOME/$TASK_ID.json" 2>/dev/null
+  fi
+  exit 1
+}
+
 # T-019: clamp the per-command bash tolerance to the 120..300s range (default 300).
 case "$BASH_TIMEOUT_S" in ''|*[!0-9]*) BASH_TIMEOUT_S=300 ;;
   *) if [ "$BASH_TIMEOUT_S" -lt 120 ] || [ "$BASH_TIMEOUT_S" -gt 300 ]; then
@@ -273,6 +296,26 @@ if [[ -n "$RESUME_TASK_ID" ]]; then
   TASK_ID="$RESUME_TASK_ID"
 fi
 log "task: $TASK_ID — $TITLE"
+
+# ------------------------------------------------------- issue #13 guard ----
+# Single-captain / wave-ownership guard (runs BEFORE workspace/worktree, so a
+# refusal takes NO lease and opens NO pane). Skipped on resume (watchdog recovery
+# of the SAME task is not a new wave).
+if [[ -z "$RESUME_TASK_ID" ]]; then
+  CAPTAIN_ID="$(fleet_captain_id)"
+  # (1) ownership — opt-in, fail-open for laptops w/o PI_FLEET_CAPTAIN
+  if ! fleet_captain_owns "$PROJECT" "$STATE_HOME"; then
+    refuse_launch "another captain session ($(fleet_captain_id)) owns the wave role for project $PROJECT — single-captain guard (issue #13)"
+  fi
+  # (2) duplicate live group — refuse only CLEAR duplicates (same label, different
+  #     groupId, same project, LIVE). Same-wave members and terminal waves never block.
+  if fleet_captain_duplicate_label "$PROJECT" "${GROUP_ID:-}" "${GROUP_LABEL:-}" "$TASK_ID" "$STATE_HOME"; then
+    refuse_launch "a live group with label '${GROUP_LABEL}' already exists for project $PROJECT (different groupId) — refusing duplicate launch (issue #13)"
+  fi
+  if [[ -n "${GROUP_ID:-}" ]]; then
+    log "captain $CAPTAIN_ID (@${HOSTNAME:-$(hostname 2>/dev/null || echo unknown)}) launching group ${GROUP_ID} (label=${GROUP_LABEL:-<none>}) — wave-ownership guard passed"
+  fi
+fi
 
 resolve_fleet_workspace() {
   # DEDICATED "fleet" workspace (single one): children run here, NEVER in the
@@ -506,6 +549,7 @@ cat > "$STATE_JSON.tmp" <<EOF
   "groupMode": "${GROUP_MODE:-barrier}",
   "kind": "${KIND:-ship}",
   "deliveryPosture": $(jq -Rn --arg v "${DELIVERY_POSTURE:-no-mistakes}" '$v'),
+  "captainId": $(jq -Rn --arg v "$(fleet_captain_id)" '$v'),
   "groupFailPolicy": "${GROUP_FAIL_POLICY:-waitAll}",
   "nested": $([ "${NESTED:-0}" = "1" ] && echo true || echo false),
   "depth": ${CHILD_DEPTH:-1},
