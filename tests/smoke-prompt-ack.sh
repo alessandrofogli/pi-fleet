@@ -164,6 +164,7 @@ cat > "$MOCK_BIN/treehouse" <<'EOF'
 # (pool rows) and a GUARDED `return` (--if-lease-id/--if-lease-holder). The
 # pool state lives in $MOCK_POOL (JSON array of rows); `get` seeds it.
 set -u
+MOCK_POOL="${MOCK_POOL:-${MOCK_TREE_LOG%.tree}.pool.json}"
 echo "TREEHOUSE $*" >> "${MOCK_TREE_LOG:?}"
 case "${1:-}" in
   get)
@@ -447,6 +448,8 @@ write_envs "$SCRATCH/s2.env" \
   "MOCK_COPIED_PROMPT=$SCRATCH/s2.copy" \
   "MOCK_PANE_ID=p2" \
   "MOCK_WT_PATH=$WT" \
+  "MOCK_POOL=$SCRATCH/s2.pool.json" \
+  "MOCK_LEASE_ID=mock-lease-s2" \
   "MOCK_TREE_LOG=$SCRATCH/s2.tree" \
   "HOME=$HOME_DIR" \
   "PATH=$MOCK_BIN:$PATH"
@@ -510,6 +513,8 @@ write_envs "$SCRATCH/s4.env" \
   "MOCK_COPIED_PROMPT=$SCRATCH/s4.copy" \
   "MOCK_PANE_ID=p4" \
   "MOCK_WT_PATH=$WT" \
+  "MOCK_POOL=$SCRATCH/s4.pool.json" \
+  "MOCK_LEASE_ID=mock-lease-s4" \
   "MOCK_TREE_LOG=$SCRATCH/s4.tree" \
   "HOME=$HOME_DIR" \
   "PATH=$MOCK_BIN:$PATH" \
