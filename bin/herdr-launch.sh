@@ -319,26 +319,80 @@ if [[ "$USE_WORKTREE" == 1 ]]; then
   # prove ownership with the exact `--if-lease-id` guard. Older treehouse
   # versions without --json keep the classic path-only output → leaseId empty
   # and the exact-holder guard is used instead.
-  WT_OUT="$(cd "$PROJECT" && treehouse get --lease --no-fetch --lease-holder "pi-fleet:$TASK_ID" --json 2>&1)" \
-    || WT_OUT="$(cd "$PROJECT" && treehouse get --lease --no-fetch --lease-holder "pi-fleet:$TASK_ID" 2>&1)" \
-    || { herr "treehouse get failed for '$PROJECT': $WT_OUT"; exit 1; }
+  # gh-8: capture stdout (the JSON record) SEPARATELY from stderr (the 🌳
+  # banners). Merging them (2>&1) breaks `jq -e .` on the banner text, the
+  # JSON branch is never taken, and the legacy last-line fallback then mis-takes
+  # the JSON record for the path — the regression that failed every launch after
+  # the gh-8 merge with 'invalid worktree: {...json...}' and leaked the lease.
+  WT_ERR_FILE="$(mktemp)"
+  WT_OUT=""
+  if WT_JSON="$(cd "$PROJECT" && treehouse get --lease --no-fetch --lease-holder "pi-fleet:$TASK_ID" --json 2>"$WT_ERR_FILE")"; then
+    WT_OUT="$(cat "$WT_ERR_FILE" 2>/dev/null || true)"  # banners, kept for logs
+  elif WT_JSON="$(cd "$PROJECT" && treehouse get --lease --no-fetch --lease-holder "pi-fleet:$TASK_ID" 2>&1)"; then
+    WT_OUT=""  # legacy merged stream
+  else
+    herr "treehouse get failed for '$PROJECT': $(cat "$WT_ERR_FILE" 2>/dev/null || true)"
+    rm -f "$WT_ERR_FILE"
+    exit 1
+  fi
+  rm -f "$WT_ERR_FILE"
   WT_LEASE_ID=""
   WT_PATH=""
-  if printf '%s' "$WT_OUT" | jq -e . >/dev/null 2>&1; then
-    WT_PATH="$(printf '%s' "$WT_OUT" | jq -r 'if type=="array" then (.[0].path // "") elif type=="object" then (.path // .lease.path // .result.path // "") else "" end' 2>/dev/null || true)"
-    WT_LEASE_ID="$(printf '%s' "$WT_OUT" | jq -r 'if type=="array" then (.[0].lease_id // "") elif type=="object" then (.lease_id // .lease.lease_id // .result.lease_id // "") else "" end' 2>/dev/null || true)"
-    if [[ -z "$WT_PATH" ]]; then
+  # banner-proof parse: take the LAST line that is a JSON record with a
+  # resolvable path (works whether banners ride stdout or stderr).
+  while IFS= read -r _wt_line; do
+    [[ -z "$_wt_line" ]] && continue
+    if printf '%s' "$_wt_line" | jq -e 'type=="object" or type=="array"' >/dev/null 2>&1; then
+      _wt_p="$(printf '%s' "$_wt_line" | jq -r 'if type=="array" then (.[0].path // "") elif type=="object" then (.path // .lease.path // .result.path // "") else "" end' 2>/dev/null || true)"
+      if [[ -n "$_wt_p" ]]; then
+        WT_PATH="$_wt_p"
+        WT_LEASE_ID="$(printf '%s' "$_wt_line" | jq -r 'if type=="array" then (.[0].lease_id // "") elif type=="object" then (.lease_id // .lease.lease_id // .result.lease_id // "") else "" end' 2>/dev/null || true)"
+      fi
+    fi
+  done <<< "$WT_JSON"
+  if [[ -z "$WT_PATH" ]]; then
+    if printf '%s' "$WT_JSON" | jq -e . >/dev/null 2>&1; then
       # a JSON acquisition record WITHOUT a resolvable path is ambiguous:
       # reject it (the held lease stays recoverable via status join by holder).
-      herr "ambiguous treehouse acquisition (no path in the JSON record): $WT_OUT"
+      herr "ambiguous treehouse acquisition (no path in the JSON record): $WT_JSON"
       exit 1
     fi
-  else
     # legacy path-only stdout — the path is the last line (banners go to stderr)
-    WT_PATH="${WT_OUT##*$'\n'}"
-    WT_LEASE_ID=""
+    WT_PATH="${WT_JSON##*$'\n'}"
   fi
-  [[ -d "$WT_PATH" ]] || { herr "invalid worktree: $WT_PATH (acquisition: ${WT_OUT:0:160})"; exit 1; }
+  if [[ -z "$WT_PATH" ]]; then
+    herr "treehouse acquisition returned no worktree path (record: $(printf '%s' "$WT_JSON" | head -c 200))"
+    exit 1
+  fi
+  # gh-8 hardening: persist the lease identity IMMEDIATELY (before any further
+  # validation) and arm a guarded EXIT cleanup, so a launcher failure between
+  # acquisition and the full state write (line ~430) can NEVER leak the lease.
+  # The full write and the later trap registrations both REPLACE this one, so
+  # there is no double-release once the normal lifecycle is armed.
+  if [[ -z "$RESUME_TASK_ID" ]]; then
+    if printf '{"id":%s,"project":%s,"worktree":1,"worktreePath":%s,"leaseId":%s,"leaseHolder":%s,"leaseAcquiredAt":%s,"state":"spawning","startedAt":%s,"lastBeatAt":%s,"doneAt":null}\n' \
+        "$(jq -Rn --arg v "$TASK_ID" '$v')" \
+        "$(jq -Rn --arg v "$PROJECT" '$v')" \
+        "$(jq -Rn --arg v "$WT_PATH" '$v')" \
+        "$(jq -Rn --arg v "${WT_LEASE_ID:-}" '$v')" \
+        "$(jq -Rn --arg v "pi-fleet:$TASK_ID" '$v')" \
+        "$(date +%s)000" "$(date +%s)000" "$(date +%s)000" \
+        > "$STATE_HOME/$TASK_ID.json.tmp" 2>/dev/null && mv "$STATE_HOME/$TASK_ID.json.tmp" "$STATE_HOME/$TASK_ID.json" 2>/dev/null; then
+      # one-liner guard: release via the shared owner ONLY if a lease was
+      # persisted, then exit 1 (later lifecycle trap registrations REPLACE
+      # this one, so once the normal flow is armed there is no double-release).
+      trap 'acq_j="${STATE_HOME}/${TASK_ID}.json"; if [ "$(jq -r .leaseId "$acq_j" 2>/dev/null || true)" != "" ]; then jq --arg s failed --arg n "$(date +%s)000" -c ".state = \$s | .doneAt = \$n" "$acq_j" > "$acq_j.tmp" 2>/dev/null && mv "$acq_j.tmp" "$acq_j" 2>/dev/null; "${SCRIPT_DIR}/fleet-cleanup.sh" "${TASK_ID}" >/dev/null 2>&1; fi; exit 1' EXIT
+    else
+      herr "acquisition record persist failed — releasing the fresh lease immediately (exact guard)"
+      if [[ -n "$WT_LEASE_ID" ]]; then
+        treehouse return "$WT_PATH" --if-lease-id "$WT_LEASE_ID" >/dev/null 2>&1
+      else
+        treehouse return "$WT_PATH" --if-lease-holder "pi-fleet:$TASK_ID" >/dev/null 2>&1
+      fi
+      exit 1
+    fi
+  fi
+  [[ -d "$WT_PATH" ]] || { herr "invalid worktree: $WT_PATH (acquisition: $(printf '%s' "$WT_OUT" | head -c 160))"; exit 1; }
   TASK_CWD="$WT_PATH"
   if [[ -n "$WT_LEASE_ID" ]]; then
     log "worktree: $WT_PATH (lease $WT_LEASE_ID, holder pi-fleet:$TASK_ID)"

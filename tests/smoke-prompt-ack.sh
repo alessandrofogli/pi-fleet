@@ -179,6 +179,12 @@ case "${1:-}" in
       esac
     done
     [[ -n "$holder" ]] || holder="pi-fleet:mock"
+    # real treehouse prints the 🌳 banners to STDERR and the record to STDOUT:
+    # the launcher must survive the interleave (regression guard — the gh-8
+    # merge failed EVERY launch because 2>&1 broke the jq gate and the last-
+    # line fallback mis-took the JSON record for the path).
+    printf 'Setting up worktree...\n' >&2
+    printf 'Leased worktree at %s.\n' "${MOCK_WT_PATH:?}" >&2
     if [[ -n "$want_json" ]]; then
       printf '{"path":"%s","lease_id":"%s","lease_holder":"%s"}\n' "${MOCK_WT_PATH:?}" "${MOCK_LEASE_ID:-mock-lease-1}" "$holder"
     else
