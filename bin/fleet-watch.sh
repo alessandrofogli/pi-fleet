@@ -39,6 +39,22 @@ case "${FLEET_HEALTH_KILL_S:-}" in ''|*[!0-9]*) : ;; *) KILL_T=$FLEET_HEALTH_KIL
 [ "$STALE_T" -lt 1 ] && STALE_T=1
 [ "$KILL_T" -lt 1 ] && KILL_T=1
 
+# issue-16/T-027: stale-wake dedup + throttle. A task stuck in `running` past its
+# timeout (or with a dead pane) used to re-enqueue `stale: <tid> ...` on EVERY poll
+# (no dedup) → ~8k wake deliveries flooded the captain (session timeout). We mirror
+# the failed/done dedup (already_queued anchor) AND add:
+#   - STALE_REDELIVER_MIN : minimum seconds between two stale wakes for the SAME
+#     task (brief: 5-10 min; default 600 s = 10 min). Test/override via env.
+#   - STALE_MAX           : cap of stale deliveries for a task before it is
+#     ESCALATED to a single anchored `signal: <tid> failed` wake (queue-anchor:
+#     already_queued + a cap sentinel), so a permanently stuck running task cannot
+#     re-stale forever — it terminates the wake stream exactly once.
+STALE_REDELIVER_MIN=${FLEET_STALE_REDELIVER_MIN:-600}
+case "$STALE_REDELIVER_MIN" in ''|*[!0-9]*) STALE_REDELIVER_MIN=600 ;; esac
+STALE_MAX=${FLEET_STALE_MAX:-6}
+case "$STALE_MAX" in ''|*[!0-9]*) STALE_MAX=6 ;; esac
+[ "$STALE_MAX" -lt 1 ] && STALE_MAX=1
+
 # Numeric validation (avoids arithmetic error under set -u)
 case "$POLL" in ''|*[!0-9]*) POLL=3 ;; esac
 case "$HEARTBEAT" in ''|*[!0-9]*) HEARTBEAT=60 ;; esac
@@ -180,6 +196,50 @@ _fleet_already_queued() {
   return 1
 }
 
+# issue-16/T-027: deduped + throttled stale wake. Returns 0 (and sets
+# _actionable/_taskId_found) when a stale wake should be enqueued, 1 when it must
+# be ABSORBED (already in the queue, inside the min re-delivery interval, or past
+# the delivery cap). Never touches the audit record <id>.json; throttle/cap state
+# lives in .wake-stale-<tid> (JSON {last,count}) + the .wake-stale-cap-<tid>
+# sentinel (both pruned by _fleet_prune_done_sentinels when the record disappears).
+_fleet_try_stale_wake() {
+  local tid="$1" reason="$2"
+  # dedup: a wake for this task is already in the queue → absorb (mirror failed/done)
+  _fleet_already_queued "$tid" && return 1
+  local st_file="$STATE/.wake-stale-$tid" cap="$STATE/.wake-stale-cap-$tid"
+  local last=0 count=0 l c now
+  if [ -f "$st_file" ]; then
+    l=$(jq -r '.last // 0' "$st_file" 2>/dev/null) || l=0
+    c=$(jq -r '.count // 0' "$st_file" 2>/dev/null) || c=0
+    case "$l" in ''|*[!0-9]*) l=0 ;; esac
+    case "$c" in ''|*[!0-9]*) c=0 ;; esac
+    last=$l; count=$c
+  fi
+  now=$(date +%s 2>/dev/null || echo 0)
+  case "$now" in ''|*[!0-9]*) now=0 ;; esac
+  # delivery cap reached → escalate ONCE to an anchored `failed` wake (queue-anchor:
+  # already_queued + cap sentinel); afterwards this task's stale stream is silent.
+  if [ "$count" -ge "$STALE_MAX" ]; then
+    if [ ! -f "$cap" ] && ! _fleet_already_queued "$tid"; then
+      _actionable="signal: ${tid} failed"
+      _taskId_found="$tid"
+      printf '%s\n' "$now" > "$cap.tmp.$$" 2>/dev/null && mv "$cap.tmp.$$" "$cap" 2>/dev/null || rm -f "$cap.tmp.$$" 2>/dev/null || true
+      return 0
+    fi
+    return 1
+  fi
+  # minimum re-delivery interval not yet elapsed for this task → absorb
+  if [ $((now - last)) -lt "$STALE_REDELIVER_MIN" ]; then
+    return 1
+  fi
+  # normal stale wake: record delivery time + count, then enqueue (caller breaks)
+  _actionable="stale: ${tid} ${reason}"
+  _taskId_found="$tid"
+  jq -nc --argjson last "$now" --argjson count "$((count + 1))" '{last:$last, count:$count}' \
+    > "$st_file.tmp.$$" 2>/dev/null && mv "$st_file.tmp.$$" "$st_file" 2>/dev/null || rm -f "$st_file.tmp.$$" 2>/dev/null || true
+  return 0
+}
+
 # T-025: prune done-wake sentinels (.wake-done-<id>) whose event was consumed
 # (done.json removed by --cleanup / launcher) or whose audit record <id>.json
 # is gone — keeps the sentinel set bounded to LIVE done events and guarantees a
@@ -194,6 +254,23 @@ _fleet_prune_done_sentinels() {
     if [ ! -f "$STATE/$tid.json" ] || [ ! -f "$STATE/$tid.done.json" ]; then
       rm -f "$s" 2>/dev/null || true
     fi
+  done
+  # issue-16/T-027: prune stale-wake throttle/cap files (.wake-stale-<tid> and
+  # .wake-stale-cap-<tid>) once the task record is gone — keeps the set bounded
+  # to LIVE running tasks (a stale stuck task is not freed by any consuming event,
+  # so we prune on record disappearance, mirroring the done-sentinel lifecycle).
+  for s in "$STATE"/.wake-stale-*; do
+    [ -e "$s" ] || continue
+    tid=${s##*/}
+    tid=${tid#.wake-stale-}
+    case "$tid" in
+      cap-*)
+        t=${tid#cap-}
+        case "$t" in ''|*/*|*\\*) rm -f "$s" 2>/dev/null || true; continue ;; esac
+        tid="$t" ;;
+      ''|*/*|*\\*) rm -f "$s" 2>/dev/null || true; continue ;;
+    esac
+    [ -f "$STATE/$tid.json" ] || rm -f "$s" 2>/dev/null || true
   done
 }
 
@@ -279,9 +356,10 @@ while :; do
       if [ "$_timeoutMs" -gt 0 ] && [ "$_startedAt" -gt 0 ]; then
         _elapsed=$((_now_ms - _startedAt))
         if [ "$_elapsed" -gt "$_timeoutMs" ]; then
-          _actionable="stale: ${_tid} timeout"
-          _taskId_found="$_tid"
-          break
+          # issue-16/T-027: dedup + throttle (already_queued / min interval / cap)
+          if _fleet_try_stale_wake "$_tid" "timeout"; then
+            break
+          fi
         fi
       fi
 
@@ -292,9 +370,10 @@ while :; do
         if [ "$_age_ms" -gt 30000 ]; then
           if [ -n "$_agents" ]; then
             if ! printf '%s' "$_agents" | jq -e --arg p "$_paneId" '[.result.agents[]? | select(.pane_id==$p)] | length > 0' >/dev/null 2>&1; then
-              _actionable="stale: ${_tid} pane dead"
-              _taskId_found="$_tid"
-              break
+              # issue-16/T-027: dedup + throttle (already_queued / min interval / cap)
+              if _fleet_try_stale_wake "$_tid" "pane dead"; then
+                break
+              fi
             fi
           fi
           # ----- T-019 pane-health watchdog (running panes only) -----
