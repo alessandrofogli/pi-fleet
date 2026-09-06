@@ -41,11 +41,11 @@ Follow the **`fleet-review-loop`** skill (orchestrator procedure) and hand the
 
 ## LOOP SEMANTICS (non-negotiable)
 
-1. **Exactly 3 fixed cycles — MECHANICALLY ENFORCED (T-019).** The loop bound
-   lives in `$FLEET_STATE_HOME/<loopId>.loop.json` (default `~/.pi/fleet/`), a
-   `{cycle, maxCycles}` counter read/updated by `bin/fleet-loop-helper.sh` EVERY
-   cycle (never trust the prompt alone). Let `H={{PI_FLEET_ROOT}}/bin/fleet-loop-helper.sh`
-   and `LOOP_ID=loop-{{PIPELINE_ID}}`.
+1. **Exactly 3 fixed cycles — MECHANICALLY ENFORCED (T-019/gh-14).** The loop
+   bound lives in `$FLEET_STATE_HOME/<loopId>.loop.json` (default `~/.pi/fleet/`),
+   a `{cycle, maxCycles, rounds, verdict}` state read/updated by
+   `bin/fleet-loop-helper.sh` EVERY cycle (never trust the prompt alone). Let
+   `H={{PI_FLEET_ROOT}}/bin/fleet-loop-helper.sh` and `LOOP_ID=loop-{{PIPELINE_ID}}`.
    - **Start of every cycle** run `$H loop-next $LOOP_ID 3`. It either returns
      `{"ok":true,"cycle":N,...}` (proceed) or **REFUSES** with
      `{"ok":false,"refused":"maxCycles"}` (exit 1): then STOP the loop, write the
@@ -54,11 +54,22 @@ Follow the **`fleet-review-loop`** skill (orchestrator procedure) and hand the
      FAILED_TO_CONVERGE) run `$H loop-final $LOOP_ID 3`. A refusal
      (`refused:"early-exit"`) means the cycle count is below the bound: you MUST
      continue the loop, never close with a verdict.
+   - **Persist each round**: at the end of every cycle run
+     `$H loop-record $LOOP_ID 3 <PASS|FAILED_TO_CONVERGE> <findings.json>` so the
+     round's findings + verdict are written to `rounds` (top-level `verdict` is
+     set only at the bound).
+   - **No relaunch of a live/same-label wave**: before launching any review wave
+     derive the label `GROUP=$($H loop-label $LOOP_ID {{PIPELINE_ID}})`
+     (gives `grp-{{PIPELINE_ID}}-r<N>` from the SAME counter) and run
+     `$H loop-guard $LOOP_ID {{PIPELINE_ID}}`. A refusal
+     (`refused:"live-group"` / `refused:"round-done"`) means a wave with that
+     label is already live (or the round is done): STOP — never relaunch it.
    - Cycle 2 and cycle 3 are FRESH reviews from scratch (fresh reviewer tasks,
      never reused sessions). A cycle is: review wave → findings → fix wave → verify.
 2. **Reviewer wave** = one `fleet_launch` per `review_skills` entry across the
    spec slices, `kind: "scout"`, `project: {{PROJECT}}`, shared explicit
-   `groupId` (`grp-{{PIPELINE_ID}}-r<c>`), `groupMode: "barrier"`,
+   `groupId` = `$GROUP` (from `loop-label` above — embeds the round count r<N>),
+   `groupMode: "barrier"`,
    `groupFailPolicy: "waitAll"` → exactly ONE group digest wakes you.
    `needs_input` breaks the barrier (an immediate wake): answer via
    `fleet_steer` or abort the wave (`fleet_abort`); never continue on a
@@ -137,6 +148,10 @@ fixers must not expand it. Do not touch anything outside `{{PROJECT}}`.
   `refused:"early-exit"`) is a BOUND, not a glitch: read the JSON, write the
   FAILED_TO_CONVERGE report (or continue the loop) exactly as the LOOP SEMANTICS
   section says. Never bypass the helper with a hand-written `.loop.json`.
+- `$H loop-guard` returning `refused:"live-group"` (or `refused:"round-done"`)
+  is a RELAUNCH GUARD, not a glitch: a review wave with that label is already
+  live (or the round is recorded). Do NOT relaunch it — abort or wait for the
+  live group's digest, then re-run `loop-guard`.
 - Frozen panes (T-019): if a reviewer/fixer pane hangs, the pane-health watchdog
   auto-steers ('abort command + commit WIP'), then kills and relaunches it from
   the last WIP commit; a relaunched task keeps its task id (`relaunches` record
