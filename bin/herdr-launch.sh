@@ -381,7 +381,7 @@ if [[ "$USE_WORKTREE" == 1 ]]; then
       # one-liner guard: release via the shared owner ONLY if a lease was
       # persisted, then exit 1 (later lifecycle trap registrations REPLACE
       # this one, so once the normal flow is armed there is no double-release).
-      trap 'acq_j="${STATE_HOME}/${TASK_ID}.json"; if [ "$(jq -r .leaseId "$acq_j" 2>/dev/null || true)" != "" ]; then jq --arg s failed --arg n "$(date +%s)000" -c ".state = \$s | .doneAt = \$n" "$acq_j" > "$acq_j.tmp" 2>/dev/null && mv "$acq_j.tmp" "$acq_j" 2>/dev/null; "${SCRIPT_DIR}/fleet-cleanup.sh" "${TASK_ID}" >/dev/null 2>&1; fi; exit 1' EXIT
+      trap 'acq_j="${STATE_HOME}/${TASK_ID}.json"; if [ "$(jq -r .leaseId "$acq_j" 2>/dev/null || true)" != "" ]; then jq --arg s failed --arg n "$(date +%s)000" -c ".state = \$s | .doneAt = (\$n | tonumber)" "$acq_j" > "$acq_j.tmp" 2>/dev/null && mv "$acq_j.tmp" "$acq_j" 2>/dev/null; "${SCRIPT_DIR}/fleet-cleanup.sh" "${TASK_ID}" >/dev/null 2>&1; fi; exit 1' EXIT
     else
       herr "acquisition record persist failed — releasing the fresh lease immediately (exact guard)"
       if [[ -n "$WT_LEASE_ID" ]]; then
