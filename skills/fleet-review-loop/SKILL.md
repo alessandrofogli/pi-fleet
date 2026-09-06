@@ -70,6 +70,12 @@ For each review cycle:
 
 ## Launching review tasks
 
+Before ANY review wave, derive the group label from the mechanical counter and
+run the relaunch guard (see *Mechanical bound*): `$H loop-label $LOOP_ID
+<pipeline>` gives `grp-<pipeline>-r<N>`; `$H loop-guard $LOOP_ID <pipeline>`
+REFUSES if a live group with the same label already exists in `.wake-groups/`
+(or the round is already recorded). Never launch past a refusal.
+
 Each reviewer is a pi-fleet task:
 
 - `kind: "scout"` — reviewers never modify code, so a scout (report
@@ -293,21 +299,54 @@ STATUS: FAILED_TO_CONVERGE
 
 Do not automatically start a fourth cycle.
 
-### Mechanical bound (T-019)
+### Mechanical bound (T-019 / gh-14)
 
 The 3-cycle cap is enforced by the loop-state file
-`~/.pi/fleet/<loopId>.loop.json` (`{cycle, maxCycles}`), read/updated by
+`~/.pi/fleet/<loopId>.loop.json`, read/updated by
 `bin/fleet-loop-helper.sh` at every cycle — never by the prompt alone:
+
+Loop-state schema (gh-14) — `{cycle, maxCycles, updatedAt, rounds, verdict}`:
+
+- `cycle` — the round count (started at 1, bumped by `loop-next`);
+- `rounds` — array of per-round records `{cycle, verdict, findings}` persisted
+  by `loop-record` (findings are the deduped BLOCKING/NON_BLOCKING findings of
+  that round);
+- `verdict` — the TERMINAL verdict (PASS | FAILED_TO_CONVERGE), written only
+  at `cycle == maxCycles`.
+
+Subcommands (all JSON out, exit 1 on refusal):
 
 - `loop-next <loopId> <maxCycles>` — start of every cycle. A refusal
   (`{"ok":false,"refused":"maxCycles"}`) means the bound is reached: stop,
   do NOT open another cycle;
 - `loop-final <loopId> <maxCycles>` — gate for any terminal verdict: it
   succeeds only when `cycle == maxCycles`. Refusing `early-exit` means the
-  loop is below the bound: continue, never close with a verdict.
+  loop is below the bound: continue, never close with a verdict;
+- `loop-record <loopId> <maxCycles> <verdict> [findingsFile]` — persist the
+  CURRENT round's findings + verdict into `rounds`; the top-level `verdict`
+  is set only at the bound. Call it at the end of every cycle so the bound,
+  findings and verdict live on disk end-to-end (never prompt-only);
+- `loop-label <loopId> <prefix>` — mechanically surface the round count in a
+  group label: `{"group":"grp-<prefix>-r<N>"}` from the same counter
+  `loop-next` bumps (so `r<N>` is enforced, not hand-typed);
+- `loop-guard <loopId> <prefix>` — BEFORE (re)launching a review wave, refuse
+  (`{"ok":false,"refused":"live-group"}`) if a LIVE group with the same
+  label already exists in `.wake-groups/`, or the round is already recorded
+  (`refused:"round-done"`). Never relaunch a review wave past the guard.
 
-An orchestrator that cannot bump the bound (or cannot pass `loop-final`)
-must not continue the loop and must not write a terminal verdict: it reports
+Cycle flow (mechanical, enforced):
+
+1. `NEXT=$($H loop-next $LOOP_ID 3)` — bump + refuse at the bound;
+2. `GROUP=$($H loop-label $LOOP_ID <pipeline>)` — derive the group label
+   `grp-<pipeline>-r<N>` from the counter;
+3. `$H loop-guard $LOOP_ID <pipeline>` — refuse if a live group with the same
+   label exists (or the round is done);
+4. launch reviewers with `groupId`/`groupLabel = $GROUP`;
+5. at the end of the cycle, `$H loop-record $LOOP_ID 3 <verdict> <findings>`
+   so the round's findings + verdict are persisted.
+
+An orchestrator that cannot bump the bound (or cannot pass `loop-final`) must
+not continue the loop and must not write a terminal verdict: it reports
 `FAILED_TO_CONVERGE` with the reason (`maxCycles` reached / `early-exit`
 refused).
 

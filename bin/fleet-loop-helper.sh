@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
-# pi-fleet · deterministic review-loop helper (T-015)
+# pi-fleet · deterministic review-loop helper (T-015 / gh-14)
 #
 # Pure, deterministic helpers for the review&fix loop (see
 # skills/fleet-review-loop and skills/review-loop-protocol). No AI: JSON in →
 # JSON out. The loop-state subcommands (T-019) are the ONE documented exception
 # to 'no state mutation': they read/update the mechanical cycle bound file
-# ~/.pi/fleet/<loop>.loop.json ({cycle, maxCycles}) so the orchestrator bound is
-# machine-enforced, not prompt-only.
+# ~/.pi/fleet/<loop>.loop.json so the orchestrator bound is machine-enforced,
+# not prompt-only.
+#
+# Loop-state file schema (gh-14) — $FLEET_STATE_HOME/<loopId>.loop.json:
+#   { cycle, maxCycles, updatedAt, rounds:[{cycle,verdict,findings}], verdict }
+#   `cycle` = round count; `rounds` = per-round findings + verdict persisted on
+#   disk (loop-record); `verdict` = TERMINAL verdict, set only at the bound
+#   (cycle == maxCycles). The bound + findings + verdict are mechanical, never
+#   prompt-only.
 #
 # Subcommands:
 #   dedup <state-file...>        merge + deduplicate findings (by id + location)
@@ -23,10 +30,19 @@
 #   loop-final <loopId> <maxCycles>
 #                                gate for a terminal verdict: ok ONLY when
 #                                cycle == maxCycles (refuses early exits)
+#   loop-record <loopId> <maxCycles> <verdict> [findingsFile]
+#                                persist the CURRENT round's findings + verdict
+#                                into `rounds`; top-level `verdict` set only at
+#                                the bound (gh-14 a)
+#   loop-label <loopId> <prefix> mechanically surface the round count in a group
+#                                label: {"group":"grp-<prefix>-r<N>"} (gh-14 c)
+#   loop-guard <loopId> <prefix> refuse to (re)launch a review wave while a LIVE
+#                                group with the same label exists in
+#                                .wake-groups/ or the round is already recorded
+#                                (gh-14 b)
 #   loop-state <loopId>          read-only dump of the bound file
 #   help                         this message
 #
-# Loop-state file: $FLEET_STATE_HOME/<loopId>.loop.json (default ~/.pi/fleet).
 # loopId is sanitized to [A-Za-z0-9._-] (max 64 chars). loop-next:
 #   missing file -> init cycle=1 (ok, first cycle) | cycle < maxCycles -> bump
 #   | cycle >= maxCycles -> REFUSE {"ok":false,"refused":"maxCycles",...} exit 1.
@@ -404,13 +420,17 @@ loop_read() {
   jq -r '{cycle: (.cycle // 0), maxCycles: (.maxCycles // 0)}' "$f" 2>/dev/null
 }
 
-# loop_write <loopId> <cycle> <maxCycles> (atomic tmp+mv)
+# loop_write <loopId> <cycle> <maxCycles> (atomic tmp+mv; preserves rounds+verdict)
 loop_write() {
-  local f
+  local f rounds verdict
   f="$(loop_file "$1")"
   mkdir -p "$LOOP_STATE_HOME" 2>/dev/null || true
+  rounds="$(jq -c '.rounds // []' "$f" 2>/dev/null || echo '[]')"
+  verdict="$(jq -r '.verdict // ""' "$f" 2>/dev/null || echo '')"
   jq -nc --argjson c "$2" --argjson m "$3" --argjson at "$(date +%s)000" \
-    '{cycle:$c, maxCycles:$m, updatedAt:$at}' > "$f.tmp.$$" 2>/dev/null \
+    --argjson rounds "$rounds" --arg v "$verdict" \
+    '{cycle:$c, maxCycles:$m, updatedAt:$at, rounds:$rounds, verdict:$v}' \
+    > "$f.tmp.$$" 2>/dev/null \
     && mv "$f.tmp.$$" "$f" 2>/dev/null \
     && rm -f "$f.tmp.$$" 2>/dev/null || true
 }
@@ -477,13 +497,119 @@ cmd_loop_final() {
 }
 
 cmd_loop_state() {
-  local cur
-  cur="$(loop_read "${1:-}")"
-  if [[ -z "$cur" ]]; then
+  local f="$(loop_file "${1:-}")"
+  if [[ ! -f "$f" ]]; then
     jq -nc '{ok:false, refused:"missing", cycle:0, maxCycles:0}'
     exit 1
   fi
-  printf '%s\n' "$cur"
+  jq -c '{cycle:(.cycle//0), maxCycles:(.maxCycles//0), rounds:(.rounds//[]), verdict:(.verdict//"")}' "$f" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# loop-record <loopId> <maxCycles> <verdict> [findingsFile]  (gh-14 a)
+# Persist the CURRENT cycle's findings + per-round verdict into the loop-state
+# file's `rounds` array (upsert at rounds[cycle-1]) so the loop bound is
+# mechanical end-to-end: findings + verdict are on disk, never prompt-only.
+# The TOP-LEVEL `verdict` (terminal) is set ONLY when cycle == maxCycles — the
+# same bound loop-final gates. `<verdict>` ∈ {PASS, FAILED_TO_CONVERGE}.
+# findings: normalized array from findingsFile (done-marker / findings.json /
+# bare array); [] when omitted/missing. Deterministic given the same inputs.
+# ---------------------------------------------------------------------------
+cmd_loop_record() {
+  local loopId="${1:-}" max="${2:-}" verdict="${3:-}" findingsFile="${4:-}"
+  local cur cy arr findings f terminal
+  [[ -n "$loopId" && -n "$max" && -n "$verdict" ]] \
+    || die "loop-record: <loopId> <maxCycles> <verdict> [findingsFile] required"
+  case "$max" in ''|*[!0-9]*) die "loop-record: maxCycles must be a positive integer" ;; esac
+  [ "$max" -ge 1 ] || die "loop-record: maxCycles must be >= 1"
+  case "$verdict" in PASS|FAILED_TO_CONVERGE) ;; *) die "loop-record: verdict must be PASS or FAILED_TO_CONVERGE (got: $verdict)" ;; esac
+  cur="$(loop_read "$loopId")"
+  if [[ -z "$cur" ]]; then
+    jq -nc --argjson m "$max" '{ok:false, refused:"unstarted", cycle:0, maxCycles:$m}'
+    exit 1
+  fi
+  cy="$(printf '%s' "$cur" | jq -r '.cycle // 0')"
+  findings="[]"
+  if [[ -n "$findingsFile" && -f "$findingsFile" ]]; then
+    arr="$(normalize "$findingsFile")"
+    [[ -n "$arr" ]] && findings="$arr"
+  fi
+  f="$(loop_file "$loopId")"
+  jq -c --argjson c "$cy" --argjson m "$max" --argjson at "$(date +%s)000" \
+    --argjson findings "$findings" --arg v "$verdict" '
+    { cycle: $c, maxCycles: $m, updatedAt: $at,
+      rounds: ( ( .rounds // [] ) as $r
+                | ( [$r[] | select(.cycle != $c)] + [{cycle:$c, verdict:$v, findings:$findings}] )
+                | sort_by(.cycle) ),
+      verdict: ( if $c >= $m then $v else (.verdict // "") end ) }
+  ' "$f" > "$f.tmp.$$" 2>/dev/null && mv "$f.tmp.$$" "$f" 2>/dev/null && rm -f "$f.tmp.$$" 2>/dev/null || true
+  terminal="$(jq -r '.verdict // ""' "$f" 2>/dev/null || echo '')"
+  jq -nc --argjson c "$cy" --argjson m "$max" --arg t "$terminal" --arg rv "$verdict" \
+    '{ok:true, cycle:$c, maxCycles:$m, verdict:$t, roundVerdict:$rv, persisted:true}'
+}
+
+# ---------------------------------------------------------------------------
+# loop-label <loopId> <prefix>  (gh-14 c)
+# Mechanically surface the round count in a group label: returns
+# {"ok":true,"cycle":N,"group":"grp-<prefix>-r<N>"} from the persisted counter
+# (missing loop -> cycle 1; never bumps). The label is derived from the SAME
+# counter loop-next bumps, so r<N> is enforced, not hand-typed.
+# ---------------------------------------------------------------------------
+cmd_loop_label() {
+  local loopId="${1:-}" prefix="${2:-}" cur cy
+  [[ -n "$loopId" && -n "$prefix" ]] || die "loop-label: <loopId> <prefix> required"
+  cy=1
+  cur="$(loop_read "$loopId")"
+  [[ -n "$cur" ]] && cy="$(printf '%s' "$cur" | jq -r '.cycle // 1')"
+  jq -nc --argjson c "$cy" --arg p "$prefix" '{ok:true, cycle:$c, group:("grp-" + $p + "-r" + ($c|tostring))}'
+}
+
+# ---------------------------------------------------------------------------
+# loop-guard <loopId> <prefix>  (gh-14 b)
+# Refuse to (re)launch a review wave while a LIVE group with the same label
+# exists. The group label is derived mechanically from the persisted cycle
+# (grp-<prefix>-r<N>), so a relaunch of the same round is caught by scanning
+# .wake-groups/*.json for a live group whose groupId OR label matches. A live
+# group = a persisted .wake-groups record (removed only after its digest is
+# delivered); no such dir -> nothing live -> ok. Also refuses when the current
+# round is ALREADY recorded in the loop-state `rounds` (a completed round must
+# not be relaunched).
+# ---------------------------------------------------------------------------
+cmd_loop_guard() {
+  local loopId="${1:-}" prefix="${2:-}" cur cy gid grpdir gf gmatch
+  local liveId liveLabel done_round
+  [[ -n "$loopId" && -n "$prefix" ]] || die "loop-guard: <loopId> <prefix> required"
+  cy=1
+  cur="$(loop_read "$loopId")"
+  [[ -n "$cur" ]] && cy="$(printf '%s' "$cur" | jq -r '.cycle // 1')"
+  gid="grp-${prefix}-r${cy}"
+  grpdir="$LOOP_STATE_HOME/.wake-groups"
+  # live-group scan (bounded: one pass over the registry, no recursion)
+  gmatch=""
+  if [[ -d "$grpdir" ]]; then
+    for gf in "$grpdir"/*.json; do
+      [[ -e "$gf" ]] || continue
+      [[ "$(basename "$gf")" == *.tmp-* ]] && continue
+      if jq -e --arg g "$gid" '.groupId == $g or (.label != null and .label == $g)' "$gf" >/dev/null 2>&1; then
+        gmatch="$gf"
+        break
+      fi
+    done
+  fi
+  if [[ -n "$gmatch" ]]; then
+    liveId="$(jq -r '.groupId // empty' "$gmatch" 2>/dev/null || echo '')"
+    liveLabel="$(jq -r '.label // empty' "$gmatch" 2>/dev/null || echo '')"
+    jq -nc --argjson c "$cy" --arg g "$gid" --arg id "$liveId" --arg lb "$liveLabel" \
+      '{ok:false, refused:"live-group", group:$g, liveGroupId:$id, liveLabel:$lb, message:"a live group with the same review label already exists: refusing to relaunch"}'
+    exit 1
+  fi
+  # already-recorded round (a completed round must not be relaunched)
+  done_round="$(jq -r --argjson c "$cy" '[.rounds[]? | select(.cycle == $c)] | length' "$(loop_file "$loopId")" 2>/dev/null || echo 0)"
+  if [[ "$done_round" != "0" ]]; then
+    jq -nc --argjson c "$cy" --arg g "$gid" '{ok:false, refused:"round-done", group:$g, cycle:$c, message:"round already recorded in loop state: refusing to relaunch"}'
+    exit 1
+  fi
+  jq -nc --argjson c "$cy" --arg g "$gid" '{ok:true, group:$g, cycle:$c}'
 }
 
 # ---------------------------------------------------------------------------
@@ -498,6 +624,9 @@ main() {
     loop-init)     cmd_loop_init "$@" ;;
     loop-next)     cmd_loop_next "$@" ;;
     loop-final)    cmd_loop_final "$@" ;;
+    loop-record)   cmd_loop_record "$@" ;;
+    loop-label)    cmd_loop_label "$@" ;;
+    loop-guard)    cmd_loop_guard "$@" ;;
     loop-state)    cmd_loop_state "$@" ;;
     help|-h|--help) usage; exit 0 ;;
     *) die "unknown subcommand: $cmd (try: help)" ;;
