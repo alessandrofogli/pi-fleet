@@ -29,6 +29,14 @@ import { mountFleetWatchArm } from "./fleet-watch-arm.js";
 // T-028 — captain audible reply (completion notification): bell policy + sink
 // (pure module, dependency-free; see fleet-sound.ts).
 import { createSoundTracker, ringForSettledTurn } from "./fleet-sound.js";
+// gh-9 — Fleet Calm mode: home-persistent quiet transcript presentation.
+// MINIMAL hook: module activation only (import + factory call at the bottom of
+// piFleetExtension). fleet-calm.ts registers its own command/tool wrappers and
+// presentation adapters and is fully fail-soft — it can never break the fleet
+// tools/watcher. It does NOT touch TaskStateFile, fleet_abort,
+// reconcileStaleTasks, spawnLauncher or any launcher/cleanup logic (gh-8 owns
+// those; the captain integrates later).
+import { installFleetCalm } from "./lib/fleet-calm.js";
 import type { GroupRecord, GroupTaskInfo } from "./fleet-group.js";
 import type { InboxMsg } from "./fleet-inbox.js";
 import type { CheckedTool, GroupSummaryLike } from "./fleet-bootstrap.js";
@@ -2200,4 +2208,13 @@ export default function piFleetExtension(pi: ExtensionAPI): void {
       ringForSettledTurn(STATE_HOME, soundTracker);
     } catch { /* fail soft: the bell must never break the captain turn */ }
   });
+
+  // gh-9 — Fleet Calm mode. MINIMAL registration hook: import + module
+  // activation. Fail-soft: if the calm module ever throws, the rest of the
+  // extension (fleet tools / watcher) is untouched.
+  try {
+    installFleetCalm(pi);
+  } catch (error) {
+    console.warn(`[pi-fleet] fleet-calm activation failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
