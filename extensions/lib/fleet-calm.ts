@@ -453,18 +453,18 @@ export function installFleetCalm(pi: ExtensionAPI): void {
     setCalmStockExportRendering(false);
     publishPresentationState();
     agentRunActive = false;
-    applyFleetCalmWorkingPresentation(ctx.ui, calmPresentationIsActive(), false, true);
+    applyFleetCalmWorkingPresentation(ctx?.ui, calmPresentationIsActive(), false, true);
     // Guard: some modes (RPC/print) hand extensions a partial UI context.
-    if (typeof ctx.ui?.setHiddenThinkingLabel === "function") {
-      ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
+    if (typeof ctx?.ui?.setHiddenThinkingLabel === "function") {
+      ctx?.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
     }
-    if (typeof ctx.ui?.setStatus === "function") {
-      ctx.ui.setStatus("pi-fleet-fleet-calm", undefined);
+    if (typeof ctx?.ui?.setStatus === "function") {
+      ctx?.ui.setStatus("pi-fleet-fleet-calm", undefined);
     }
     removeTerminalInputHandler?.();
     try {
-      if (typeof ctx.ui?.onTerminalInput !== "function") return;
-      removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
+      if (typeof ctx?.ui?.onTerminalInput !== "function") return;
+      removeTerminalInputHandler = ctx?.ui.onTerminalInput((data) => {
         if (!tuiState.available || !data) return undefined;
         const matches = (() => {
           try {
@@ -477,7 +477,7 @@ export function installFleetCalm(pi: ExtensionAPI): void {
         })();
         if (!matches) return undefined;
 
-        const input = typeof ctx.ui?.getEditorText === "function" ? ctx.ui.getEditorText().trim() : "";
+        const input = typeof ctx?.ui?.getEditorText === "function" ? ctx?.ui.getEditorText().trim() : "";
         if (
           input !== "/share" &&
           input !== "/export" &&
@@ -500,8 +500,8 @@ export function installFleetCalm(pi: ExtensionAPI): void {
           setCalmStockExportRendering(false);
           publishPresentationState();
           repaintCalmToolRows();
-          if (typeof ctx.ui?.setStatus === "function") {
-            ctx.ui.setStatus("pi-fleet-fleet-calm", undefined);
+          if (typeof ctx?.ui?.setStatus === "function") {
+            ctx?.ui.setStatus("pi-fleet-fleet-calm", undefined);
           }
         }, 0);
         return undefined;
@@ -514,18 +514,18 @@ export function installFleetCalm(pi: ExtensionAPI): void {
 
   pi.on("agent_start", (_event, ctx) => {
     agentRunActive = true;
-    applyFleetCalmWorkingPresentation(ctx.ui, calmPresentationIsActive(), true);
+    applyFleetCalmWorkingPresentation(ctx?.ui, calmPresentationIsActive(), true);
   });
 
   // agent_settled fires from a finally block — also covers abort and failure.
   pi.on("agent_settled", (_event, ctx) => {
     agentRunActive = false;
-    applyFleetCalmWorkingPresentation(ctx.ui, calmPresentationIsActive(), false);
+    applyFleetCalmWorkingPresentation(ctx?.ui, calmPresentationIsActive(), false);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     agentRunActive = false;
-    applyFleetCalmWorkingPresentation(ctx.ui, calmPresentationIsActive(), false);
+    applyFleetCalmWorkingPresentation(ctx?.ui, calmPresentationIsActive(), false);
   });
 
   // Command name: "fleet-calm" (not "calm") — pi-fleet convention (every fleet
@@ -538,27 +538,27 @@ export function installFleetCalm(pi: ExtensionAPI): void {
       const active = !calmPresentationIsActive();
       persistCalmPreference(active);
       setCalmPresentation(active);
-      if (active) activateBuiltInsIfNeeded(ctx.ui);
+      if (active) activateBuiltInsIfNeeded(ctx?.ui);
       publishPresentationState();
-      applyFleetCalmWorkingPresentation(ctx.ui, active, agentRunActive, true);
+      applyFleetCalmWorkingPresentation(ctx?.ui, active, agentRunActive, true);
       // Guard (RPC/print modes hand extensions a partial UI context).
-      if (typeof ctx.ui?.setHiddenThinkingLabel === "function") {
-        ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
+      if (typeof ctx?.ui?.setHiddenThinkingLabel === "function") {
+        ctx?.ui.setHiddenThinkingLabel(active ? "" : undefined);
       }
-      if (typeof ctx.ui?.setStatus === "function") {
-        ctx.ui.setStatus("pi-fleet-fleet-calm", undefined);
+      if (typeof ctx?.ui?.setStatus === "function") {
+        ctx?.ui.setStatus("pi-fleet-fleet-calm", undefined);
       }
 
       // Expansion round-trip forces ToolExecutionComponent to rebuild the rows
       // with the new renderShell/render content, then restores the exact
       // previous Ctrl+O state.
       if (
-        typeof ctx.ui?.getToolsExpanded === "function" &&
-        typeof ctx.ui?.setToolsExpanded === "function"
+        typeof ctx?.ui?.getToolsExpanded === "function" &&
+        typeof ctx?.ui?.setToolsExpanded === "function"
       ) {
-        const expanded = ctx.ui.getToolsExpanded();
-        ctx.ui.setToolsExpanded(!expanded);
-        ctx.ui.setToolsExpanded(expanded);
+        const expanded = ctx?.ui.getToolsExpanded();
+        ctx?.ui.setToolsExpanded(!expanded);
+        ctx?.ui.setToolsExpanded(expanded);
       }
     },
   });
