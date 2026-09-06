@@ -515,6 +515,7 @@ Optional environment:
 ```bash
 bash tests/smoke-health.sh        # T-019 frozen-pane watchdog fixtures (18 checks)
 bash tests/smoke-loop-bound.sh    # T-019 mechanical loop bound (17 checks)
+bash tests/smoke-loop-state.sh    # gh-14 persisted loop state / relaunch guard (15 checks)
 bash tests/smoke-loop.sh          # review&fix loop semantics (4 scenarios)
 ```
 
@@ -530,6 +531,13 @@ bash tests/smoke-loop.sh          # review&fix loop semantics (4 scenarios)
   against a scratch `FLEET_STATE_HOME`: mechanical refusal of a 4th cycle
   (`refused:"maxCycles"`) and of terminal verdicts before the bound
   (`refused:"early-exit"`), loopId sanitization.
+- `smoke-loop-state.sh` (gh-14): the loop-state file now carries `rounds` +
+  `verdict` on top of `{cycle, maxCycles}`; `loop-record` persists each round's
+  findings + verdict (terminal verdict only at the bound); `loop-guard`
+  REFUSES relaunching a review wave while a live `.wake-groups/` group with the
+  same label exists (`refused:"live-group"`) or the round is already recorded
+  (`refused:"round-done"`); `loop-label` surfaces the round count in the group
+  label (`grp-<prefix>-r<N>`) from the same mechanical counter.
 
 Both run entirely in `/tmp` scratch (state, repo, fakes) and never touch
 `~/.pi/fleet`.
