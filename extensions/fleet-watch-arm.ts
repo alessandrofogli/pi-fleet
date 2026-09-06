@@ -15,6 +15,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -621,8 +622,19 @@ export function mountFleetWatchArm(pi: ExtensionAPI, opts: FleetWatchArmOpts): {
     };
   }
 
-  // Initial drain of any pending wakes (Pi was closed)
+  // #12: captain-workspace gate (mirrors IS_CAPTAIN in extensions/index.ts). The pending-wake
+  // drain broadcast must NEVER fire in a fleet child / sub-agent session: those are INDEPENDENT
+  // pi sessions that load this extension, and an unconditional drain would inject the wake queue
+  // as the FIRST message, displacing the child's native brief. Children are identified by
+  // PI_FLEET_CHILD=1, or a non-captain cwd without PI_FLEET_CAPTAIN=1.
+  function isCaptainSession(): boolean {
+    if (process.env.PI_FLEET_CHILD === "1") return false;
+    return process.env.PI_FLEET_CAPTAIN === "1" || process.cwd() === homedir();
+  }
+
+  // Initial drain of any pending wakes (Pi was closed) — captain session ONLY.
   function drainPendingAtStartup(): void {
+    if (!isCaptainSession()) return; // #12: never broadcast pending wakes into a fleet child session
     if (!existsSync(drainScript)) return;
     try {
       const r = spawnSync("bash", [drainScript, "--count"], {
