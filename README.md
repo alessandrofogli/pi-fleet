@@ -513,11 +513,24 @@ Optional environment:
 ### Headless acceptance smokes (no herdr, no real fleet state)
 
 ```bash
+bash tests/smoke-launcher-failure.sh  # issue #15 launcher-failure guarantee (25 checks)
 bash tests/smoke-health.sh        # T-019 frozen-pane watchdog fixtures (18 checks)
 bash tests/smoke-loop-bound.sh    # T-019 mechanical loop bound (17 checks)
 bash tests/smoke-loop-state.sh    # gh-14 persisted loop state / relaunch guard (15 checks)
 bash tests/smoke-loop.sh          # review&fix loop semantics (4 scenarios)
 ```
+
+- `smoke-launcher-failure.sh`: issue #15 regression — the guarantee "launcher
+  failure ⇒ task terminal (failed) within N seconds + lease released".
+  Launcher-level, fake treehouse/herdr, isolated temp state. The fake treehouse
+  keeps STDOUT (the JSON record) and STDERR (the 🌳 banners) SEPARATE — never
+  `2>&1` on the parse path. S1: acquisition ok (existing worktree) but the
+  launch fails right after → task `failed` with numeric `doneAt` within <45s
+  AND the lease returned (guarded `--if-lease-id` return, pool empty, cleanup
+  record `released`). S2: the historical failure mode `invalid worktree`
+  (ghost path) → task STILL terminal `failed` (never stuck in `spawning`, not a
+  silent exit-1 with nothing on disk) and the lease is durably recorded
+  (`pending` — release not claimed on a ghost dir by design, recoverable).
 
 - `smoke-health.sh`: a **mocked herdr** (PATH-shadowed fake serving a controlled
   agent list, recording tab/pane close) + a recording launcher stub
